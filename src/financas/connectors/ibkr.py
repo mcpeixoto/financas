@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 import xml.etree.ElementTree as ET
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import httpx
@@ -462,7 +462,8 @@ def fetch_history(since: date, today: date | None = None) -> FetchResult:
     """
     global _last_mono
     _last_mono = 0.0
-    today = today or date.today()
+    # O extrato do próprio dia ainda não existe (erro 1003): acabar ontem.
+    today = today or (date.today() - timedelta(days=1))
     merged = FetchResult(source=NAME)
     mais_recente = True
     for start, end in _years_back(since, today):

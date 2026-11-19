@@ -95,7 +95,7 @@ def test_backfill_grava_so_movimentos_e_fluxos(monkeypatch, tmp_path):
 
     assert cli.main(["backfill", "--fonte", "santander", "--desde", "2018-04-05"]) == 0
     assert seen == [date(2018, 4, 5)]
-    assert precos == [("bench", "IWDA.UK"), ("btc", date(2018, 4, 5))]
+    assert precos == [("bench", "IWDA.AS"), ("btc", date(2018, 4, 5))]
 
     db = store.connect(tmp_path / "data" / "financas.db")
     assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
@@ -171,7 +171,7 @@ def test_run_grava_cashflows_e_continua_a_fazer_relatorios(monkeypatch, tmp_path
     md = list((tmp_path / "Contabilidade" / "Investimentos").glob("*_Patrimonio_auto.md"))
     assert len(md) == 1
     assert (tmp_path / "Contabilidade" / "Investimentos" / "Patrimonio_historico.xlsx").is_file()
-    assert chamadas == [("bench", "IWDA.UK"), ("btc", date(2024, 2, 1))]
+    assert chamadas == [("bench", "IWDA.AS"), ("btc", date(2024, 2, 1))]
     assert "Relatório:" in capsys.readouterr().out
 
 
@@ -249,7 +249,7 @@ def test_ibkr_pede_um_ano_de_cada_vez_e_para_quando_fica_vazio(monkeypatch, tmp_
     monkeypatch.setattr("financas.precos.btc_eur_diario", lambda db, desde: 0)
 
     assert cli.main(["backfill", "--fonte", "ibkr", "--desde", "2015-01-01"]) == 0
-    assert pedidos == [("20170101", "20170615"), ("20160101", "20161231")]
+    assert pedidos == [("20170101", "20170614"), ("20160101", "20161231")]
 
     db = store.connect(tmp_path / "data" / "financas.db")
     assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
