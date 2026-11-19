@@ -1,0 +1,30 @@
+[project]
+name = "financas"
+version = "0.1.0"
+description = "Património pessoal automático para Portugal: bancos PSD2, IBKR, eToro, Trade Republic, Certificados de Aforro e Bitcoin, só em leitura."
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "mcpeixoto" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=50.0.2",
+    "embit>=0.8.0",
+    "httpx>=0.28.1",
+    "openpyxl>=3.1.5",
+    "pyjwt>=2.15.1",
+]
+
+[project.scripts]
+financas = "financas.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.7,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "respx>=0.23.1",
+]
