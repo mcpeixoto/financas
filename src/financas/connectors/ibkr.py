@@ -455,13 +455,24 @@ def fetch(since: date, *, fd: date | None = None, td: date | None = None) -> Fet
 
 
 def fetch_history(since: date, today: date | None = None) -> FetchResult:
-    """Um pedido Flex por ano (fd/td), do presente para trás, até um ano vazio."""
+    """Um pedido Flex por ano (fd/td), do presente para trás, até um ano vazio.
+
+    O erro 1003 («statement not available») no ano mais recente continua a subir.
+    Num ano anterior trata-se como ano vazio e o ciclo pára.
+    """
     global _last_mono
     _last_mono = 0.0
     today = today or date.today()
     merged = FetchResult(source=NAME)
+    mais_recente = True
     for start, end in _years_back(since, today):
-        part, active = _download(start, start, end)
+        try:
+            part, active = _download(start, start, end)
+        except NeedsUserAction as exc:
+            if mais_recente or "1003" not in str(exc):
+                raise
+            break
+        mais_recente = False
         if not active:
             break
         merged.transactions.extend(part.transactions)

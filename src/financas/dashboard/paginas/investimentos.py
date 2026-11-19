@@ -27,7 +27,7 @@ def pagina() -> None:
         for linha in linhas:
             fonte = None if linha.fonte == "total" else linha.fonte
             nome = "Total" if fonte is None else display_name(linha.fonte)
-            referencia = benchmark(db, source=fonte, symbol="IWDA.UK")
+            referencia = benchmark(db, source=fonte)
             blocos.append(
                 {
                     "nome": nome,

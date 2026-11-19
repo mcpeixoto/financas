@@ -53,7 +53,7 @@ Há quatro páginas:
 
 - **Resumo** — património, variação desde o snapshot anterior e há 30 dias, alocação e avisos da última corrida;
 - **Gastos** — categorias, comerciantes, subscrições, dia da semana e taxa de poupança;
-- **Investimentos** — depositado, valor, ganho e XIRR por plataforma, contra o MSCI World (IWDA.UK);
+- **Investimentos** — depositado, valor, ganho e XIRR por plataforma, contra o MSCI World (IWDA.AS);
 - **Movimentos** — filtros e correção de categoria, que grava uma regra no início de `data/categorias.toml`.
 
 Para o deixar sempre a correr no macOS, o launchd abre um applet. O TCC não deixa o agente ler `~/Documents` diretamente.
@@ -81,10 +81,12 @@ Os relatórios vão para `../Investimentos/` (`AAAA-MM-DD_Patrimonio_auto.md` e 
 |---|---|---|---|
 | `santander`, `revolut` | `enablebanking_app_id`, `enablebanking_private_key` | `<banco>.session_id`, `valid_until`, `aspsp` | consentimento de 180 dias: `financas setup <banco>` |
 | `ibkr` | `ibkr_flex_token` | `ibkr.query_id` | gerar um token novo no portal (Settings → Flex Web Service) |
-| `etoro` | `etoro_api_key`, `etoro_user_key` | — | só se a chave for revogada |
+| `etoro` | `etoro_api_key`, `etoro_user_key` | `etoro.depositos` = `[{data, valor_eur}]` | só se a chave for revogada |
 | `traderepublic` | sessão em `~/.pytr/` | — | `pytr login --store_credentials --v2` (confirmar na app) |
 | `aforro` | — | `aforro.subscricoes` = `[{serie, data, valor}]` | quando houver subscrições novas |
 | `bitcoin` | `btc_zpub` | — | nunca |
+
+A API pública da eToro não devolve depósitos. Em `etoro.depositos`, cada entrada é `{"data": "AAAA-MM-DD", "valor_eur": 1000}`; um valor negativo é um levantamento. Sem esta lista, a rentabilidade do eToro não pode ser calculada.
 
 Enable Banking:
 

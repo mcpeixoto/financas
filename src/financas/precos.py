@@ -1,4 +1,4 @@
-"""Preços diários de referência: IWDA (Stooq) e Bitcoin em euros (mempool)."""
+"""Preços diários de referência: IWDA.AS (Yahoo), IWDA.UK (Stooq) e Bitcoin em euros."""
 from __future__ import annotations
 
 import csv
@@ -13,15 +13,32 @@ import httpx
 from financas import store
 
 STOOQ = "https://stooq.com/q/d/l/?s={symbol}&i=d"
+YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 MEMPOOL = "https://mempool.space/api/v1/historical-price?currency=EUR&timestamp={timestamp}"
 _USER_AGENT = "financas/0.1"
+_YAHOO_AGENT = "Mozilla/5.0"
+_YAHOO_DESDE = int(datetime(2010, 1, 1, tzinfo=timezone.utc).timestamp())
 
 
 def atualizar_benchmark(db, symbol: str = "IWDA.UK") -> int:
-    """Descarrega o fecho diário e grava-o. IWDA.UK fica em USD."""
+    """Descarrega o fecho diário e grava-o.
+
+    IWDA.AS vem da Yahoo Finance, em EUR (adjclose, ou close se faltar).
+    O símbolo por omissão continua IWDA.UK na Stooq, em USD: há testes que
+    chamam esta função sem símbolo e esperam esse CSV.
+    """
+    if symbol.upper() == "IWDA.AS":
+        return _atualizar_yahoo(db, symbol)
     text = _http_get(STOOQ.format(symbol=symbol.lower()))
     # iwda.uk está cotado em dólares na Stooq.
     return store.save_prices(db, symbol, "USD", _parse_stooq(text))
+
+
+def _atualizar_yahoo(db, symbol: str) -> int:
+    agora = int(datetime.now(timezone.utc).timestamp())
+    url = f"{YAHOO.format(symbol=symbol)}?period1={_YAHOO_DESDE}&period2={agora}&interval=1d"
+    rows, currency = _parse_yahoo(_http_get(url, user_agent=_YAHOO_AGENT))
+    return store.save_prices(db, symbol, currency, rows)
 
 
 def btc_eur_diario(db, desde: date) -> int:
@@ -101,9 +118,42 @@ def _parse_stooq(text: str) -> dict[date, Decimal]:
     return rows
 
 
-def _http_get(url: str) -> str:
+def _parse_yahoo(text: str) -> tuple[dict[date, Decimal], str]:
+    try:
+        payload = json.loads(text, parse_float=Decimal)
+        result = payload["chart"]["result"][0]
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("A resposta da Yahoo Finance não tem cotações.") from exc
+    if not isinstance(result, dict):
+        raise ValueError("A resposta da Yahoo Finance não tem cotações.")
+    serie = _serie_yahoo(result.get("indicators") or {})
+    moeda = str((result.get("meta") or {}).get("currency") or "EUR")
+    rows: dict[date, Decimal] = {}
+    for raw_ts, raw_close in zip(result.get("timestamp") or [], serie):
+        if raw_ts is None or raw_close is None:
+            continue
+        try:
+            dia = datetime.fromtimestamp(int(raw_ts), timezone.utc).date()
+            close = raw_close if isinstance(raw_close, Decimal) else Decimal(str(raw_close))
+        except (TypeError, ValueError, ArithmeticError, OSError, OverflowError):
+            continue
+        rows[dia] = close
+    return rows, moeda
+
+
+def _serie_yahoo(indicadores: dict) -> list:
+    adj = indicadores.get("adjclose") if isinstance(indicadores, dict) else None
+    if isinstance(adj, list) and adj and isinstance(adj[0], dict) and adj[0].get("adjclose") is not None:
+        return list(adj[0]["adjclose"])
+    quote = indicadores.get("quote") if isinstance(indicadores, dict) else None
+    if isinstance(quote, list) and quote and isinstance(quote[0], dict) and quote[0].get("close") is not None:
+        return list(quote[0]["close"])
+    raise ValueError("A resposta da Yahoo Finance não tem cotações.")
+
+
+def _http_get(url: str, user_agent: str | None = None) -> str:
     _recusar_rede_solta_nos_testes()
-    with httpx.Client(timeout=30, headers={"User-Agent": _USER_AGENT}) as client:
+    with httpx.Client(timeout=30, headers={"User-Agent": user_agent or _USER_AGENT}) as client:
         response = client.get(url)
         response.raise_for_status()
         return response.text
