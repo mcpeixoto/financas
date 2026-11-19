@@ -10,7 +10,8 @@ from decimal import Decimal
 import httpx
 
 from financas import secrets
-from financas.models import Balance, FetchResult, NeedsUserAction, Position, Transaction
+from financas.fx import Rates
+from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Position, Transaction
 
 NAME = "etoro"
 SECRETS = {
@@ -214,6 +215,7 @@ def fetch(since: date, _sleep=None) -> FetchResult:
     ]
 
     closed: list[dict] = []
+    cash_rows: list[dict] = []
     today = _today()
     if since <= today:
         for start, end in _windows(since, today):
@@ -230,6 +232,8 @@ def fetch(since: date, _sleep=None) -> FetchResult:
                 )
                 batch = [row for row in _rows(payload, "positions") if isinstance(row, dict)]
                 closed.extend(batch)
+                for key in ("cashflows", "moneyMovements", "accountActivity"):
+                    cash_rows.extend(row for row in _rows(payload, key) if isinstance(row, dict))
                 if len(batch) < _PAGE_SIZE:
                     break
                 page += 1
@@ -302,10 +306,75 @@ def fetch(since: date, _sleep=None) -> FetchResult:
                 ext_id=ext_id,
             )
         )
+    cashflows = _cashflows(cash_rows, since, warnings)
     return FetchResult(
         source=NAME,
         balances=balances,
         positions=positions,
         transactions=transactions,
         warnings=warnings,
+        cashflows=cashflows,
     )
+
+
+def _etoro_kind(raw: str) -> str | None:
+    text = raw.casefold().strip()
+    if "dividend" in text:
+        return "dividendo"
+    if "withdraw" in text:
+        return "levantamento"
+    if "deposit" in text:
+        return "deposito"
+    return None
+
+
+def _cashflows(rows: list[dict], since: date, warnings: list[str]) -> list[Cashflow]:
+    useful = []
+    for row in rows:
+        kind = _etoro_kind(str(_ci(row, "type") or _ci(row, "kind") or ""))
+        if kind is not None:
+            useful.append((row, kind))
+    if not useful:
+        return []
+    try:
+        rates = Rates.fetch()
+    except Exception:
+        warnings.append("Não foi possível converter os movimentos da eToro para euros.")
+        return []
+    found: list[Cashflow] = []
+    seen: set[str] = set()
+    for row, kind in useful:
+        booked = _as_date(
+            _ci(row, "date") or _ci(row, "occurredAt") or _ci(row, "timestamp") or _ci(row, "dateTime")
+        )
+        if booked is None or booked < since:
+            continue
+        raw_id = _ci(row, "id")
+        if raw_id is None:
+            raw_id = _ci(row, "cashflowId") or _ci(row, "transactionId")
+        ext_id = f"cash-{_id_key(raw_id)}" if raw_id is not None else ""
+        amount = abs(_dec(_ci(row, "amount") or 0))
+        try:
+            eur = rates.to_eur(amount, "USD")
+        except Exception:
+            warnings.append("Não foi possível converter os movimentos da eToro para euros.")
+            continue
+        if kind == "levantamento":
+            eur = -eur
+        if not ext_id:
+            ext_id = f"cash-{booked.isoformat()}-{kind}-{eur}"
+        if ext_id in seen:
+            continue
+        seen.add(ext_id)
+        description = str(_ci(row, "description") or _ci(row, "details") or kind)
+        found.append(
+            Cashflow(
+                source=NAME,
+                booked=booked,
+                amount_eur=eur,
+                kind=kind,
+                description=description,
+                ext_id=ext_id,
+            )
+        )
+    return found

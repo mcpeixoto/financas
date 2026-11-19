@@ -12,7 +12,8 @@ from embit.networks import NETWORKS
 from embit.script import p2wpkh
 
 from financas import secrets
-from financas.models import Balance, FetchResult, NeedsUserAction, Transaction
+from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Transaction
+from financas.precos import eur_historico
 
 NAME = "bitcoin"
 SECRETS = {"btc_zpub": "Chave pública mestra (zpub) do Electrum"}
@@ -127,6 +128,7 @@ def fetch(since: date) -> FetchResult:
 
     balance_sats = sum((_funded_minus_spent(info) for _addr, info in scanned), Decimal(0))
     transactions: list[Transaction] = []
+    pending: list[tuple[str, date, Decimal, int]] = []
     for txid, tx in by_txid.items():
         booked = _booked(tx)
         if booked is None or booked < since:
@@ -143,7 +145,11 @@ def fetch(since: date) -> FetchResult:
                 ext_id=txid,
             )
         )
+        raw_time = (tx.get("status") or {}).get("block_time")
+        if net != 0 and raw_time is not None:
+            pending.append((txid, booked, net, int(raw_time)))
     transactions.sort(key=lambda item: (item.booked, item.ext_id))
+    cashflows = _cashflows(pending)
 
     return FetchResult(
         source=NAME,
@@ -157,4 +163,51 @@ def fetch(since: date) -> FetchResult:
             )
         ],
         transactions=transactions,
+        cashflows=cashflows,
     )
+
+
+def _preco_eur(client: httpx.Client, timestamp: int) -> Decimal | None:
+    url = f"https://mempool.space/api/v1/historical-price?currency=EUR&timestamp={timestamp}"
+    try:
+        response = client.get(url)
+    except Exception:
+        return None
+    if response.status_code >= 400:
+        return None
+    try:
+        payload = json.loads(response.text, parse_float=Decimal)
+    except ValueError:
+        return None
+    return eur_historico(payload, timestamp)
+
+
+def _cashflows(pending: list[tuple[str, date, Decimal, int]]) -> list[Cashflow]:
+    if not pending:
+        return []
+    found: list[Cashflow] = []
+    cache: dict[int, Decimal | None] = {}
+    with httpx.Client(timeout=30) as client:
+        for txid, booked, net, timestamp in pending:
+            if timestamp not in cache:
+                cache[timestamp] = _preco_eur(client, timestamp)
+            price = cache[timestamp]
+            if price is None:
+                continue
+            amount = (net / _SATS) * price
+            if net > 0:
+                kind, description = "deposito", "Recebido"
+            else:
+                kind, description = "levantamento", "Enviado"
+            found.append(
+                Cashflow(
+                    source=NAME,
+                    booked=booked,
+                    amount_eur=amount,
+                    kind=kind,
+                    description=description,
+                    ext_id=txid,
+                )
+            )
+    found.sort(key=lambda item: (item.booked, item.ext_id))
+    return found

@@ -8,7 +8,7 @@ import traceback
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from financas import config, secrets, store
+from financas import config, precos, secrets, store
 from financas.connectors import enablebanking
 from financas.fx import Rates
 from financas.models import NeedsUserAction
@@ -98,6 +98,7 @@ def _run_one(db, run_id: int, name: str, since: date, rates: Rates, log_path) ->
         else:
             result = module.fetch(since)
             store.save(db, run_id, result, rates.to_eur)
+            store.save_cashflows(db, result.cashflows)
             status = "ok"
             warnings = "\n".join(result.warnings)
             source = result.source or source
@@ -157,6 +158,62 @@ def cmd_run(only: str | None, since: date | None, notify: bool) -> int:
     if notify:
         grand = sum(eur_totals(db, run_id).values(), start=Decimal(0))
         _notify(grand, len(names) - ok)
+    _atualizar_precos(db, since)
+    return 0 if ok else 1
+
+
+def _atualizar_precos(db, desde: date) -> None:
+    """Falhas de rede ficam num aviso. A corrida em si já terminou."""
+    try:
+        precos.atualizar_benchmark(db)
+    except Exception:
+        print("Aviso: não foi possível atualizar a cotação de referência (IWDA.UK).")
+    try:
+        precos.btc_eur_diario(db, desde)
+    except Exception:
+        print("Aviso: não foi possível atualizar a cotação diária do Bitcoin.")
+
+
+def _backfill_one(db, name: str, desde: date) -> str:
+    module = load_connector(name)
+    source = getattr(module, "NAME", name)
+    secret_keys = list(getattr(module, "SECRETS", {}) or {})
+    if any(secrets.get(key) is None for key in secret_keys):
+        print(f"{display_name(source)}: por configurar")
+        return "por configurar"
+    try:
+        if name == "ibkr" and hasattr(module, "fetch_history"):
+            result = module.fetch_history(desde)
+        else:
+            result = module.fetch(desde)
+        n_tx = store.save_transactions(db, result.transactions)
+        n_cf = store.save_cashflows(db, result.cashflows)
+    except NeedsUserAction as exc:
+        print(f"{display_name(source)}: precisa de ti: {exc}")
+        return "precisa de ti"
+    except Exception as exc:
+        print(f"{display_name(source)}: erro: {type(exc).__name__}: {exc}")
+        return "erro"
+    print(f"{display_name(source)}: {n_tx} movimentos novos, {n_cf} fluxos novos.")
+    return "ok"
+
+
+def cmd_backfill(fonte: str | None, desde: date | None) -> int:
+    """Grava movimentos e fluxos desde uma data, sem snapshot nem relatórios."""
+    desde = desde or date(2015, 1, 1)
+    if fonte:
+        if fonte not in CONNECTORS:
+            print(f"Fonte desconhecida: {fonte}.")
+            return 2
+        names = [fonte]
+    else:
+        names = list(CONNECTORS)
+    db = store.connect(config.DATA / "financas.db")
+    ok = 0
+    for name in names:
+        if _backfill_one(db, name, desde) == "ok":
+            ok += 1
+    _atualizar_precos(db, desde)
     return 0 if ok else 1
 
 
@@ -273,11 +330,19 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--finish", metavar="URL",
                        help="bancos: conclui com o URL de retorno do banco (não interativo)")
 
+    backfill = sub.add_parser(
+        "backfill", help="gravar movimentos e fluxos de capital desde uma data"
+    )
+    backfill.add_argument("--fonte", help="só esta fonte")
+    backfill.add_argument("--desde", type=_parse_since, help="AAAA-MM-DD; omissão: 2015-01-01")
+
     sub.add_parser("status", help="segredos, configuração e última corrida")
 
     args = parser.parse_args(argv)
     if args.cmd == "run":
         return cmd_run(args.only, args.since, notify=not args.no_notify)
+    if args.cmd == "backfill":
+        return cmd_backfill(args.fonte, args.desde)
     if args.cmd == "setup":
         if args.start or args.finish:
             return cmd_bank_auth(args.name, args.start, args.finish)
