@@ -13,7 +13,7 @@ from io import StringIO
 from pathlib import Path
 
 from financas import config
-from financas.models import Balance, FetchResult, NeedsUserAction, Position, Transaction
+from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Position, Transaction
 
 NAME = "traderepublic"
 SECRETS: dict[str, str] = {}
@@ -35,6 +35,15 @@ _TX_FIELDS: dict[str, tuple[str, ...]] = {
     "value": ("amount", "value", "valor", "betrag"),
     "note": ("description", "descricao", "note", "nota", "buchung"),
     "isin": ("isin",),
+}
+_CASH_KIND = {
+    "deposit": "deposito",
+    "einzahlung": "deposito",
+    "removal": "levantamento",
+    "auszahlung": "levantamento",
+    "dividend": "dividendo",
+    "interest": "juros",
+    "zinsen": "juros",
 }
 
 
@@ -78,7 +87,7 @@ def fetch(since: date) -> FetchResult:
         positions, cash = _parse_portfolio(portfolio_path.read_text(encoding="utf-8-sig"))
         if cash is None:
             cash = _stdout_cash(portfolio_proc)
-        transactions = _parse_transactions(
+        transactions, cashflows = _parse_transactions(
             "\n".join(p.read_text(encoding="utf-8-sig") for p in produced),
             since,
         )
@@ -102,6 +111,7 @@ def fetch(since: date) -> FetchResult:
         positions=positions,
         transactions=transactions,
         warnings=warnings,
+        cashflows=cashflows,
     )
 
 
@@ -185,9 +195,10 @@ def _parse_portfolio(text: str) -> tuple[list[Position], Decimal | None]:
     return positions, cash
 
 
-def _parse_transactions(text: str, since: date) -> list[Transaction]:
+def _parse_transactions(text: str, since: date) -> tuple[list[Transaction], list[Cashflow]]:
     grouped: dict[date, int] = {}
     found: list[Transaction] = []
+    flows: list[Cashflow] = []
     for row in _read_table(text):
         mapped = _map_row(row, _TX_FIELDS)
         raw_date = mapped.get("date", "").strip()
@@ -220,7 +231,27 @@ def _parse_transactions(text: str, since: date) -> list[Transaction]:
                 ext_id=ext_id,
             )
         )
-    return found
+        kind = _CASH_KIND.get(typ.casefold())
+        if kind is None:
+            continue
+        flows.append(
+            Cashflow(
+                source=NAME,
+                booked=booked,
+                amount_eur=_com_sinal(kind, amount),
+                kind=kind,
+                description=description,
+                ext_id=ext_id,
+            )
+        )
+    return found, flows
+
+
+def _com_sinal(kind: str, amount: Decimal) -> Decimal:
+    magnitude = abs(amount)
+    if kind in {"levantamento", "custo"}:
+        return -magnitude
+    return magnitude
 
 
 def _read_table(text: str) -> list[dict[str, str]]:

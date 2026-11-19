@@ -38,6 +38,21 @@ class Transaction:
     ext_id: str          # stable id for dedup; build a hash if provider has none
 
 
+@dataclass(frozen=True)
+class Cashflow:
+    """Fluxo de capital com a plataforma, já em euros.
+
+    deposito > 0, levantamento < 0, dividendo e juros > 0, custo < 0.
+    """
+
+    source: str
+    booked: date
+    amount_eur: Decimal
+    kind: str            # deposito | levantamento | dividendo | juros | custo
+    description: str
+    ext_id: str
+
+
 @dataclass
 class FetchResult:
     source: str
@@ -45,6 +60,7 @@ class FetchResult:
     positions: list[Position] = field(default_factory=list)
     transactions: list[Transaction] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    cashflows: list[Cashflow] = field(default_factory=list)
 
 
 class NeedsUserAction(Exception):

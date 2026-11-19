@@ -11,7 +11,7 @@ from io import StringIO
 import httpx
 
 from financas import config
-from financas.models import Balance, FetchResult, NeedsUserAction, Transaction
+from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Transaction
 
 NAME = "aforro"
 SECRETS: dict[str, str] = {}
@@ -201,6 +201,19 @@ def fetch(since: date) -> FetchResult:
                 kind="savings",
             )
         )
+        if sub_date >= since:
+            result.cashflows.append(
+                Cashflow(
+                    source=NAME,
+                    booked=sub_date,
+                    amount_eur=_as_decimal(sub["valor"]),
+                    kind="deposito",
+                    description="Subscrição CA",
+                    ext_id=hashlib.sha1(
+                        f"aforro|deposito|{account}|{sub_date.isoformat()}".encode()
+                    ).hexdigest(),
+                )
+            )
         for pay, net in events:
             if pay < since:
                 continue
@@ -214,6 +227,16 @@ def fetch(since: date) -> FetchResult:
                     booked=pay,
                     amount=net,
                     currency="EUR",
+                    description="Juros líquidos CA",
+                    ext_id=ext_id,
+                )
+            )
+            result.cashflows.append(
+                Cashflow(
+                    source=NAME,
+                    booked=pay,
+                    amount_eur=net,
+                    kind="juros",
                     description="Juros líquidos CA",
                     ext_id=ext_id,
                 )
