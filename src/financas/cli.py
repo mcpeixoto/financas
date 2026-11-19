@@ -196,9 +196,9 @@ def cmd_run(only: str | None, since: date | None, notify: bool) -> int:
 def _atualizar_precos(db, desde: date) -> None:
     """Falhas de rede ficam num aviso. A corrida em si já terminou."""
     try:
-        precos.atualizar_benchmark(db)
+        precos.atualizar_benchmark(db, "IWDA.AS")
     except Exception:
-        print("Aviso: não foi possível atualizar a cotação de referência (IWDA.UK).")
+        print("Aviso: não foi possível atualizar a cotação de referência (IWDA.AS).")
     try:
         precos.btc_eur_diario(db, desde)
     except Exception:

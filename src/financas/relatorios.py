@@ -299,7 +299,7 @@ def _seccao_rentabilidade(db, fim: date, com_valores: bool) -> str:
     for linha in rentabilidade(db, ate=fim):
         fonte = None if linha.fonte == "total" else linha.fonte
         nome = "Total" if fonte is None else display_name(linha.fonte)
-        referencia = benchmark(db, source=fonte, symbol="IWDA.UK", fx=fx, ate=fim)
+        referencia = benchmark(db, source=fonte, symbol="IWDA.AS", fx=fx, ate=fim)
         veredicto = veredicto_benchmark(linha.xirr, referencia.xirr)
         ganho = formatar_percentagem(linha.ganho_pct)
         xirr = formatar_percentagem(linha.xirr)
@@ -322,7 +322,7 @@ def _seccao_rentabilidade(db, fim: date, com_valores: bool) -> str:
         colunas = ["Plataforma", "Depositado", "Valor", "Ganho", "XIRR", "MSCI World", "Comparação"]
     else:
         colunas = ["Plataforma", "Ganho", "XIRR", "MSCI World", "Comparação"]
-    intro = _p("Contra o MSCI World (IWDA.UK).")
+    intro = _p("Contra o MSCI World (IWDA.AS).")
     corpo = intro + (_tabela(colunas, linhas) if linhas else _p("Sem plataformas para comparar."))
     return _seccao("Rentabilidade", corpo)
 
