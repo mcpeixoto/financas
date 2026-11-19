@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 
 from financas.analise import (
     alocacao,
-    benchmark,
+    benchmarks,
     comparacao_mes,
     estatisticas_curiosas,
     gastos_por_categoria,
@@ -295,11 +295,13 @@ def _seccao_subscricoes(db, fim: date, com_valores: bool) -> str:
 
 def _seccao_rentabilidade(db, fim: date, com_valores: bool) -> str:
     fx = _fx_de_saldos(db)
+    linhas_rent = rentabilidade(db, ate=fim)
+    fontes = [None if linha.fonte == "total" else linha.fonte for linha in linhas_rent]
+    referencias = benchmarks(db, fontes, symbol="IWDA.AS", fx=fx, ate=fim)
     linhas = []
-    for linha in rentabilidade(db, ate=fim):
+    for linha, referencia in zip(linhas_rent, referencias, strict=True):
         fonte = None if linha.fonte == "total" else linha.fonte
         nome = "Total" if fonte is None else display_name(linha.fonte)
-        referencia = benchmark(db, source=fonte, symbol="IWDA.AS", fx=fx, ate=fim)
         veredicto = veredicto_benchmark(linha.xirr, referencia.xirr)
         ganho = formatar_percentagem(linha.ganho_pct)
         xirr = formatar_percentagem(linha.xirr)

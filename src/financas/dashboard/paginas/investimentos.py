@@ -5,42 +5,14 @@ from __future__ import annotations
 def pagina() -> None:
     import streamlit as st
 
-    from financas.analise import benchmark, rentabilidade
-    from financas.dashboard.dados import (
-        curva_capital,
-        formatar_eur,
-        formatar_percentagem,
-        ligar,
-        rendimentos_por_ano,
-        veredicto_benchmark,
-    )
+    from financas.dashboard.cache import investimentos
+    from financas.dashboard.dados import formatar_eur, formatar_percentagem
     from financas.dashboard.paginas.comum import esconder_valores
     from financas.dashboard.tema import grafico_colunas, grafico_linhas
-    from financas.report import display_name
 
     st.title("Investimentos")
     esconder = esconder_valores()
-    db = ligar()
-    try:
-        linhas = rentabilidade(db)
-        blocos = []
-        for linha in linhas:
-            fonte = None if linha.fonte == "total" else linha.fonte
-            nome = "Total" if fonte is None else display_name(linha.fonte)
-            referencia = benchmark(db, source=fonte)
-            blocos.append(
-                {
-                    "nome": nome,
-                    "fonte": fonte,
-                    "linha": linha,
-                    "referencia": referencia,
-                    "veredicto": veredicto_benchmark(linha.xirr, referencia.xirr),
-                    "curva": curva_capital(db, fonte),
-                    "rendimentos": rendimentos_por_ano(db, fonte),
-                }
-            )
-    finally:
-        db.close()
+    blocos = investimentos()
 
     if esconder:
         tabela = [
@@ -48,6 +20,7 @@ def pagina() -> None:
                 "Plataforma": bloco["nome"],
                 "Ganho": formatar_percentagem(bloco["linha"].ganho_pct),
                 "XIRR": formatar_percentagem(bloco["linha"].xirr),
+                "Nota": bloco["linha"].nota,
             }
             for bloco in blocos
         ]
@@ -59,6 +32,7 @@ def pagina() -> None:
                 "Valor atual": formatar_eur(bloco["linha"].valor_atual),
                 "Ganho": formatar_percentagem(bloco["linha"].ganho_pct),
                 "XIRR": formatar_percentagem(bloco["linha"].xirr),
+                "Nota": bloco["linha"].nota,
             }
             for bloco in blocos
         ]
@@ -67,6 +41,8 @@ def pagina() -> None:
     for bloco in blocos:
         nome = bloco["nome"]
         st.subheader(nome)
+        if bloco["linha"].nota:
+            st.caption(bloco["linha"].nota)
         colunas = st.columns(2)
         colunas[0].metric(f"A tua XIRR · {nome}", formatar_percentagem(bloco["linha"].xirr))
         colunas[1].metric(f"MSCI World · {nome}", formatar_percentagem(bloco["referencia"].xirr))

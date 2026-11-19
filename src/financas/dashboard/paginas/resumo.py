@@ -7,7 +7,7 @@ def pagina() -> None:
     from datetime import date
     from decimal import Decimal
 
-    from financas.analise import alocacao, estatisticas_curiosas, patrimonio_serie
+    from financas.analise import alocacao, estatisticas_curiosas, patrimonio_serie, preencher_patrimonio
     from financas.dashboard.dados import (
         avisos_ultimo_run,
         formatar_data,
@@ -28,6 +28,7 @@ def pagina() -> None:
     db = ligar()
     try:
         serie = patrimonio_serie(db)
+        serie_cheia, preenchida = preencher_patrimonio(serie)
         variacao = variacao_patrimonio(serie)
         classes = alocacao(db)
         avisos = avisos_ultimo_run(db)
@@ -42,8 +43,9 @@ def pagina() -> None:
         st.caption(f"Snapshot de {formatar_data(variacao.dia)}.")
         colunas = st.columns(3)
         if esconder:
-            base = next((total for _dia, _fontes, total in serie if total != 0), None)
-            indice = Decimal(100) if not base else variacao.total / base * Decimal(100)
+            base = next((total for _dia, _fontes, total in serie_cheia if total != 0), None)
+            atual = serie_cheia[-1][2] if serie_cheia else variacao.total
+            indice = Decimal(100) if not base else atual / base * Decimal(100)
             colunas[0].metric("Património", formatar_indice(indice))
             colunas[1].metric(
                 "Desde o snapshot anterior",
@@ -66,11 +68,18 @@ def pagina() -> None:
                 delta=formatar_percentagem(variacao_relativa(variacao.delta_30, variacao.ha_30_dias)),
             )
 
-    if serie:
-        fontes = ordered_sources(fonte for _dia, por_fonte, _total in serie for fonte in por_fonte)
-        datas = [dia for dia, _por_fonte, _total in serie]
+    if preenchida:
+        st.caption(
+            "Algumas fontes foram preenchidas com o primeiro valor conhecido, "
+            "para o total não saltar quando uma fonte aparece. "
+            "A variação desde o snapshot anterior compara só fontes presentes nos dois snapshots."
+        )
+
+    if serie_cheia:
+        fontes = ordered_sources(fonte for _dia, por_fonte, _total in serie_cheia for fonte in por_fonte)
+        datas = [dia for dia, _por_fonte, _total in serie_cheia]
         series = [
-            (display_name(fonte), [por_fonte.get(fonte, Decimal(0)) for _dia, por_fonte, _total in serie])
+            (display_name(fonte), [por_fonte.get(fonte, Decimal(0)) for _dia, por_fonte, _total in serie_cheia])
             for fonte in fontes
         ]
         st.subheader("Património por fonte")

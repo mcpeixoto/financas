@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Context, Decimal, localcontext
 
+FONTES_BANCARIAS = ("santander", "revolut")
+FONTES_INVESTIMENTO = ("ibkr", "etoro", "traderepublic", "aforro", "bitcoin")
 _DIAS = (
     "segunda-feira",
     "terça-feira",
@@ -22,6 +24,26 @@ _RENDIMENTO = {"dividendo", "juros"}
 _MENSAL = (25, 35)
 _ANUAL = (350, 380)
 _REF = re.compile(r"\b(?:refs?|refer[eê]ncias?|references?|trx)\b\.?", re.IGNORECASE)
+_FALTA = object()
+
+
+def fontes_bancarias() -> tuple[str, ...]:
+    """Contas que entram nos gastos. ``analise.fontes_bancarias`` na config substitui a omissão."""
+    return _fontes_config("fontes_bancarias", FONTES_BANCARIAS)
+
+
+def fontes_investimento() -> tuple[str, ...]:
+    """Plataformas da página de investimentos. ``analise.fontes_investimento`` substitui a omissão."""
+    return _fontes_config("fontes_investimento", FONTES_INVESTIMENTO)
+
+
+def _fontes_config(chave: str, omissao: tuple[str, ...]) -> tuple[str, ...]:
+    from financas import config
+
+    valor = config.section("analise").get(chave)
+    if not isinstance(valor, (list, tuple)):
+        return omissao
+    return tuple(str(item) for item in valor)
 
 
 class MapaGastos(dict):
@@ -56,6 +78,7 @@ class Rentabilidade:
     ganho_absoluto: Decimal
     ganho_pct: Decimal | None
     xirr: Decimal | None
+    nota: str = ""
 
 
 @dataclass(frozen=True)
@@ -74,6 +97,25 @@ class _Movimento:
     tipo: str
     categoria: str
     comerciante: str
+
+
+def fontes_bancarias() -> tuple[str, ...]:
+    """Contas que entram nos gastos. A config `analise.fontes_bancarias` substitui a omissão."""
+    return _fontes_config("fontes_bancarias", FONTES_BANCARIAS)
+
+
+def fontes_investimento() -> tuple[str, ...]:
+    """Plataformas da página de investimentos. A config `analise.fontes_investimento` substitui a omissão."""
+    return _fontes_config("fontes_investimento", FONTES_INVESTIMENTO)
+
+
+def _fontes_config(chave: str, omissao: tuple[str, ...]) -> tuple[str, ...]:
+    from financas import config
+
+    valor = config.section("analise").get(chave)
+    if not isinstance(valor, (list, tuple)):
+        return omissao
+    return tuple(str(item) for item in valor)
 
 
 def gastos_por_categoria(db, inicio: date, fim: date, classify=None) -> MapaGastos:
@@ -238,19 +280,25 @@ def rentabilidade(db, source: str | None = None, ate: date | None = None) -> lis
     return linhas
 
 
-def benchmark(db, source: str | None = None, symbol: str = "IWDA.AS", fx=None, ate: date | None = None) -> Benchmark:
+def benchmark(
+    db,
+    source: str | None = None,
+    symbol: str = "IWDA.AS",
+    fx=None,
+    ate: date | None = None,
+    precos=None,
+) -> Benchmark:
     """E se cada depósito e levantamento tivesse comprado ou vendido ``symbol``.
 
     Usa o preço desse dia ou, se faltar, o do dia anterior mais próximo.
     ``fx(dia, moeda)`` devolve quantos EUR vale 1 unidade de ``moeda``.
     """
-    precos = [
-        (_como_data(dia), _dec(close), (moeda or "EUR").upper())
-        for dia, close, moeda in db.execute(
-            "SELECT day, close, currency FROM prices WHERE symbol = ? ORDER BY day",
-            (symbol,),
-        )
-    ]
+    if precos is None:
+        precos = _ler_precos(db, symbol)
+    else:
+        precos = [
+            (_como_data(dia), _dec(close), (moeda or "EUR").upper()) for dia, close, moeda in precos
+        ]
     cache: dict[tuple[date, str], Decimal] = {}
 
     def preco_eur(dia: date) -> Decimal | None:
@@ -294,6 +342,117 @@ def benchmark(db, source: str | None = None, symbol: str = "IWDA.AS", fx=None, a
             valor = unidades * preco_final
             fluxos.append((dia_valor, valor))
     return Benchmark(symbol, unidades, valor, xirr(fluxos), depositado)
+
+
+def benchmarks(db, fontes, symbol: str = "IWDA.AS", fx=None, ate: date | None = None) -> list[Benchmark]:
+    """Um benchmark por fonte. A tabela de preços lê-se uma vez."""
+    precos = _ler_precos(db, symbol)
+    return [benchmark(db, source=fonte, symbol=symbol, fx=fx, ate=ate, precos=precos) for fonte in fontes]
+
+
+def _ler_precos(db, symbol: str) -> list[tuple[date, Decimal, str]]:
+    return [
+        (_como_data(dia), _dec(close), (moeda or "EUR").upper())
+        for dia, close, moeda in db.execute(
+            "SELECT day, close, currency FROM prices WHERE symbol = ? ORDER BY day",
+            (symbol,),
+        )
+    ]
+
+
+def preencher_patrimonio(serie) -> tuple[list[tuple[date, dict[str, Decimal], Decimal]], bool]:
+    """Preenche cada fonte para trás com o primeiro valor e para a frente com o último.
+
+    Devolve a série somada outra vez e se algum valor foi preenchido.
+    """
+    pontos = [(dia, dict(por_fonte), total) for dia, por_fonte, total in serie]
+    if not pontos:
+        return [], False
+    fontes: list[str] = []
+    vistas: set[str] = set()
+    for _dia, por_fonte, _total in pontos:
+        for fonte in por_fonte:
+            if fonte not in vistas:
+                vistas.add(fonte)
+                fontes.append(fonte)
+    falta = object()
+    houve = False
+    for fonte in fontes:
+        coluna = [linha[fonte] if fonte in linha else falta for _dia, linha, _total in pontos]
+        if all(valor is not falta for valor in coluna):
+            continue
+        houve = True
+        primeiro = next(valor for valor in coluna if valor is not falta)
+        ultimo = None
+        for indice, valor in enumerate(coluna):
+            if valor is falta:
+                coluna[indice] = primeiro if ultimo is None else ultimo
+            else:
+                ultimo = valor
+        for indice, valor in enumerate(coluna):
+            pontos[indice][1][fonte] = valor
+    preenchida = []
+    for dia, por_fonte, _total in pontos:
+        total = sum(por_fonte.values(), start=Decimal(0))
+        preenchida.append((dia, por_fonte, total))
+    return preenchida, houve
+
+
+def rendimentos_ate(db, fonte: str | None, ate: date) -> Decimal:
+    """Dividendos e juros até ao dia, sem calcular o XIRR."""
+    if fonte is not None:
+        return _soma_rendimentos(db, fonte, ate)
+    total = Decimal(0)
+    for nome in _fontes_investimento(db, None, ate):
+        if not _tem_deposito(db, nome, ate):
+            continue
+        total += _soma_rendimentos(db, nome, ate)
+    return total
+
+
+def _soma_rendimentos(db, fonte: str, ate: date | None) -> Decimal:
+    total = Decimal(0)
+    for _booked, amount, kind in _cashflows(db, fonte, ate):
+        if kind in _RENDIMENTO:
+            total += amount
+    return total
+
+
+def serie_capital(db, fonte: str | None) -> list[tuple[date, Decimal, Decimal]]:
+    """Capital investido e valor por snapshot, sem calcular o XIRR."""
+    serie = patrimonio_serie(db)
+    if fonte is not None:
+        dias = [dia for dia, por_fonte, _total in serie if fonte in por_fonte]
+        universo = [fonte]
+        so_com_deposito = False
+    else:
+        dias = [dia for dia, _por_fonte, _total in serie]
+        universo = _fontes_investimento(db, None, None)
+        so_com_deposito = True
+    if not dias:
+        return []
+    preparados = []
+    for nome in universo:
+        fluxos = _cashflows(db, nome, None)
+        preparados.append(
+            (
+                [(booked, amount) for booked, amount, kind in fluxos if kind in _CAPITAL],
+                [booked for booked, _amount, kind in fluxos if kind == "deposito"],
+                _snapshots_valor(db, nome),
+            )
+        )
+    pontos = []
+    for dia in dias:
+        depositado = Decimal(0)
+        valor = Decimal(0)
+        for capital, depositos, snapshots in preparados:
+            if so_com_deposito and not any(booked <= dia for booked in depositos):
+                continue
+            depositado += sum((amount for booked, amount in capital if booked <= dia), start=Decimal(0))
+            montante, _quando = _valor_ate(snapshots, dia)
+            valor += montante
+        pontos.append((dia, depositado, valor))
+    return pontos
 
 
 def alocacao(db) -> dict[str, Decimal]:
@@ -362,8 +521,11 @@ def _classificador(classify):
 def _movimentos(db, classify, inicio: date | None, fim: date | None) -> tuple[list[_Movimento], list[str]]:
     taxas = _taxas_cambio(db)
     classificar = _classificador(classify)
-    clausulas = []
-    parametros: list[str] = []
+    fontes = fontes_bancarias()
+    if not fontes:
+        return [], []
+    clausulas = [f"source IN ({','.join('?' * len(fontes))})"]
+    parametros: list[str] = list(fontes)
     if inicio is not None:
         clausulas.append("booked >= ?")
         parametros.append(inicio.isoformat())
@@ -608,47 +770,94 @@ def _raiz_valida(fluxos: list[tuple[date, Decimal]], taxa: Decimal | None) -> bo
     return valor is not None and abs(valor) < Decimal("1e-6")
 
 
-def _rentabilidade_de(db, fonte: str, ate: date | None) -> Rentabilidade:
-    depositado = Decimal(0)
+def _componentes(db, fonte: str, ate: date | None):
+    depositos = Decimal(0)
+    levantamentos = Decimal(0)
     rendimentos = Decimal(0)
+    tem_deposito = False
     fluxos_capital: list[tuple[date, Decimal]] = []
     for booked, amount, kind in _cashflows(db, fonte, ate):
-        if kind in _CAPITAL:
-            depositado += amount
+        if kind == "deposito":
+            tem_deposito = True
+            depositos += amount
+            fluxos_capital.append((booked, -amount))
+        elif kind == "levantamento":
+            levantamentos += -amount
             fluxos_capital.append((booked, -amount))
         elif kind in _RENDIMENTO:
             rendimentos += amount
     valor, dia_valor = _valor_da_fonte(db, fonte, ate)
-    return _montar_rentabilidade(fonte, depositado, rendimentos, valor, dia_valor, fluxos_capital)
+    return depositos, levantamentos, rendimentos, valor, dia_valor, fluxos_capital, tem_deposito
+
+
+def _rentabilidade_de(db, fonte: str, ate: date | None) -> Rentabilidade:
+    depositos, levantamentos, rendimentos, valor, dia_valor, fluxos, tem_deposito = _componentes(db, fonte, ate)
+    if not tem_deposito:
+        depositado = depositos - levantamentos
+        return Rentabilidade(
+            fonte,
+            depositado,
+            rendimentos,
+            valor,
+            valor - depositado,
+            None,
+            None,
+            "sem dados de depósitos",
+        )
+    return _montar_rentabilidade(fonte, depositos, levantamentos, rendimentos, valor, dia_valor, fluxos, "")
 
 
 def _rentabilidade_total(db, fontes: list[str], ate: date | None) -> Rentabilidade:
-    depositado = Decimal(0)
+    depositos = Decimal(0)
+    levantamentos = Decimal(0)
     rendimentos = Decimal(0)
     valor = Decimal(0)
     dia_valor = None
     fluxos: list[tuple[date, Decimal]] = []
+    incluidas: list[str] = []
     for fonte in fontes:
-        linha_valor, linha_dia = _valor_da_fonte(db, fonte, ate)
-        valor += linha_valor
-        if linha_dia is not None and (dia_valor is None or linha_dia > dia_valor):
-            dia_valor = linha_dia
-        for booked, amount, kind in _cashflows(db, fonte, ate):
-            if kind in _CAPITAL:
-                depositado += amount
-                fluxos.append((booked, -amount))
-            elif kind in _RENDIMENTO:
-                rendimentos += amount
-    return _montar_rentabilidade("total", depositado, rendimentos, valor, dia_valor, fluxos)
+        dep, lev, rend, val, dia, flux, tem_deposito = _componentes(db, fonte, ate)
+        if not tem_deposito:
+            continue
+        incluidas.append(fonte)
+        depositos += dep
+        levantamentos += lev
+        rendimentos += rend
+        valor += val
+        if dia is not None and (dia_valor is None or dia > dia_valor):
+            dia_valor = dia
+        fluxos.extend(flux)
+    nota = _nota_total(incluidas)
+    if not incluidas:
+        return Rentabilidade("total", Decimal(0), Decimal(0), Decimal(0), Decimal(0), None, None, nota)
+    return _montar_rentabilidade(
+        "total", depositos, levantamentos, rendimentos, valor, dia_valor, fluxos, nota
+    )
 
 
-def _montar_rentabilidade(fonte, depositado, rendimentos, valor, dia_valor, fluxos_capital) -> Rentabilidade:
-    ganho = valor - depositado
+def _nota_total(fontes: list[str]) -> str:
+    from financas.report import display_name, ordered_sources
+
+    nomes = [display_name(fonte) for fonte in ordered_sources(fontes)]
+    if not nomes:
+        return "Sem plataformas com depósitos."
+    if len(nomes) == 1:
+        return f"Inclui {nomes[0]}."
+    return f"Inclui {', '.join(nomes[:-1])} e {nomes[-1]}."
+
+
+def _montar_rentabilidade(
+    fonte, depositos, levantamentos, rendimentos, valor, dia_valor, fluxos_capital, nota
+) -> Rentabilidade:
+    # Ganho = valor atual + levantamentos − depósitos. Os juros capitalizados
+    # (por exemplo nos Certificados de Aforro) já estão dentro do valor atual.
+    depositado = depositos - levantamentos
+    ganho = valor + levantamentos - depositos
     ganho_pct = None if depositado == 0 else ganho / depositado
     fluxos = list(fluxos_capital)
     if dia_valor is not None:
         fluxos.append((dia_valor, valor))
-    return Rentabilidade(fonte, depositado, rendimentos, valor, ganho, ganho_pct, xirr(fluxos))
+    return Rentabilidade(fonte, depositado, rendimentos, valor, ganho, ganho_pct, xirr(fluxos), nota)
 
 
 def _cashflows(db, fonte: str | None, ate: date | None) -> list[tuple[date, Decimal, str]]:
@@ -668,51 +877,77 @@ def _cashflows(db, fonte: str | None, ate: date | None) -> list[tuple[date, Deci
 
 
 def _fluxos_capital(db, fonte: str | None, ate: date | None) -> list[tuple[date, Decimal, str]]:
+    if fonte is None:
+        fluxos = []
+        for nome in _fontes_investimento(db, None, ate):
+            if not _tem_deposito(db, nome, ate):
+                continue
+            fluxos.extend(item for item in _cashflows(db, nome, ate) if item[2] in _CAPITAL)
+        fluxos.sort(key=lambda item: (item[0],))
+        return fluxos
     return [fluxo for fluxo in _cashflows(db, fonte, ate) if fluxo[2] in _CAPITAL]
 
 
+def _tem_deposito(db, fonte: str, ate: date | None) -> bool:
+    clausulas = ["source = ?", "kind = 'deposito'"]
+    parametros: list[str] = [fonte]
+    if ate is not None:
+        clausulas.append("booked <= ?")
+        parametros.append(ate.isoformat())
+    linha = db.execute(
+        "SELECT 1 FROM cashflows WHERE " + " AND ".join(clausulas) + " LIMIT 1",
+        parametros,
+    ).fetchone()
+    return linha is not None
+
+
 def _valor_da_fonte(db, fonte: str, ate: date | None) -> tuple[Decimal, date | None]:
-    escolhido: tuple[date, int] | None = None
-    for run_id, at in _runs_da_fonte(db, fonte):
-        dia = _como_data(at)
-        if ate is not None and dia > ate:
-            continue
-        if escolhido is None or (dia, run_id) >= escolhido:
-            escolhido = (dia, run_id)
+    return _valor_ate(_snapshots_valor(db, fonte), ate)
+
+
+def _snapshots_valor(db, fonte: str) -> list[tuple[date, Decimal]]:
+    runs: dict[int, date] = {}
+    totais: dict[int, Decimal] = {}
+    consultas = (
+        """SELECT r.id, r.at, b.amount_eur FROM balances b JOIN runs r ON r.id = b.run_id
+           WHERE b.source = ?""",
+        """SELECT r.id, r.at, p.value_eur FROM positions p JOIN runs r ON r.id = p.run_id
+           WHERE p.source = ?""",
+    )
+    for sql in consultas:
+        for run_id, at, amount in db.execute(sql, (fonte,)):
+            runs[run_id] = _como_data(at)
+            totais[run_id] = totais.get(run_id, Decimal(0)) + _dec(amount)
+    por_dia: dict[date, tuple[int, Decimal]] = {}
+    for run_id, total in totais.items():
+        dia = runs[run_id]
+        actual = por_dia.get(dia)
+        if actual is None or run_id >= actual[0]:
+            por_dia[dia] = (run_id, total)
+    return sorted((dia, total) for dia, (_run, total) in por_dia.items())
+
+
+def _valor_ate(snapshots, dia: date | None) -> tuple[Decimal, date | None]:
+    escolhido = None
+    for quando, total in snapshots:
+        if dia is not None and quando > dia:
+            break
+        escolhido = (quando, total)
     if escolhido is None:
         return Decimal(0), None
-    dia, run_id = escolhido
-    total = Decimal(0)
-    for (amount,) in db.execute(
-        "SELECT amount_eur FROM balances WHERE run_id = ? AND source = ?", (run_id, fonte)
-    ):
-        total += _dec(amount)
-    for (amount,) in db.execute(
-        "SELECT value_eur FROM positions WHERE run_id = ? AND source = ?", (run_id, fonte)
-    ):
-        total += _dec(amount)
-    return total, dia
-
-
-def _runs_da_fonte(db, fonte: str):
-    return db.execute(
-        """SELECT r.id, r.at FROM runs r
-           WHERE EXISTS (SELECT 1 FROM balances b WHERE b.run_id = r.id AND b.source = ?)
-              OR EXISTS (SELECT 1 FROM positions p WHERE p.run_id = r.id AND p.source = ?)
-           ORDER BY r.at, r.id""",
-        (fonte, fonte),
-    )
+    return escolhido[1], escolhido[0]
 
 
 def _fontes_investimento(db, source: str | None, ate: date | None) -> list[str]:
     if source is not None:
         return [source]
+    permitidas = set(fontes_investimento())
     fontes = set()
     for (fonte,) in db.execute("SELECT DISTINCT source FROM cashflows"):
         fontes.add(fonte)
     for fonte in _ultimo_run_por_fonte(db, ate):
         fontes.add(fonte)
-    return sorted(fontes)
+    return sorted(fonte for fonte in fontes if fonte in permitidas)
 
 
 def _ultimo_run_por_fonte(db, ate: date | None = None) -> dict[str, int]:

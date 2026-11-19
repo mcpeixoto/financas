@@ -10,11 +10,14 @@ from pathlib import Path
 
 from financas.analise import (
     _normalizar_descricao,
+    benchmarks,
     comparacao_mes,
     gastos_por_categoria,
     gastos_por_dia_semana,
-    patrimonio_serie,
+    fontes_investimento,
+    rendimentos_ate,
     rentabilidade,
+    serie_capital,
     subscricoes,
     taxa_poupanca,
     top_comerciantes,
@@ -205,20 +208,35 @@ class VariacaoPatrimonio:
     delta_30: Decimal | None
 
 
+def _comuns(esquerda: dict, direita: dict) -> tuple[Decimal, Decimal] | None:
+    chaves = set(esquerda) & set(direita)
+    if not chaves:
+        return None
+    base = sum((esquerda[chave] for chave in chaves), start=Decimal(0))
+    atual = sum((direita[chave] for chave in chaves), start=Decimal(0))
+    return base, atual
+
+
 def variacao_patrimonio(serie) -> VariacaoPatrimonio:
     if not serie:
         return VariacaoPatrimonio(Decimal(0), None, None, None, None, None, None, None)
-    dia, _fontes, total = serie[-1]
+    dia, fontes, total = serie[-1]
     anterior = dia_anterior = delta_anterior = None
     if len(serie) >= 2:
-        dia_anterior, _fontes, anterior = serie[-2]
-        delta_anterior = total - anterior
+        dia_anterior, fontes_anteriores, _total_anterior = serie[-2]
+        comparado = _comuns(fontes_anteriores, fontes)
+        if comparado is not None:
+            anterior, atual = comparado
+            delta_anterior = atual - anterior
     limite = dia - timedelta(days=30)
     candidatos = [ponto for ponto in serie if ponto[0] <= limite]
     ha_30 = dia_30 = delta_30 = None
     if candidatos:
-        dia_30, _fontes, ha_30 = candidatos[-1]
-        delta_30 = total - ha_30
+        dia_30, fontes_30, _total_30 = candidatos[-1]
+        comparado = _comuns(fontes_30, fontes)
+        if comparado is not None:
+            ha_30, atual = comparado
+            delta_30 = atual - ha_30
     return VariacaoPatrimonio(
         total, dia, anterior, dia_anterior, delta_anterior, ha_30, dia_30, delta_30
     )
@@ -472,23 +490,31 @@ def listar_movimentos(
     return linhas
 
 
-def _linha_rentabilidade(db, fonte: str | None, ate: date):
-    linhas = rentabilidade(db, source=fonte, ate=ate)
-    if fonte is None:
-        for linha in linhas:
-            if linha.fonte == "total":
-                return linha
-    return linhas[-1]
-
-
 def curva_capital(db, fonte: str | None) -> list[tuple[date, Decimal, Decimal]]:
-    pontos = []
-    for dia, por_fonte, _total in patrimonio_serie(db):
-        if fonte is not None and fonte not in por_fonte:
-            continue
-        linha = _linha_rentabilidade(db, fonte, dia)
-        pontos.append((dia, linha.depositado_liquido, linha.valor_atual))
-    return pontos
+    return serie_capital(db, fonte)
+
+
+def montar_investimentos(db, symbol: str = "IWDA.AS"):
+    """Tabela, curvas e benchmark das plataformas. Os preços lêem-se uma vez."""
+    linhas = rentabilidade(db)
+    fontes = [None if linha.fonte == "total" else linha.fonte for linha in linhas]
+    referencias = benchmarks(db, fontes, symbol=symbol)
+    blocos = []
+    for linha, referencia in zip(linhas, referencias, strict=True):
+        fonte = None if linha.fonte == "total" else linha.fonte
+        nome = "Total" if fonte is None else display_name(linha.fonte)
+        blocos.append(
+            {
+                "nome": nome,
+                "fonte": fonte,
+                "linha": linha,
+                "referencia": referencia,
+                "veredicto": veredicto_benchmark(linha.xirr, referencia.xirr),
+                "curva": curva_capital(db, fonte),
+                "rendimentos": rendimentos_por_ano(db, fonte),
+            }
+        )
+    return blocos
 
 
 def rendimentos_por_ano(db, fonte: str | None) -> list[tuple[int, Decimal]]:
@@ -497,6 +523,12 @@ def rendimentos_por_ano(db, fonte: str | None) -> list[tuple[int, Decimal]]:
     if fonte is not None:
         clausulas.append("source = ?")
         parametros.append(fonte)
+    else:
+        fontes = fontes_investimento()
+        if not fontes:
+            return []
+        clausulas.append(f"source IN ({','.join('?' * len(fontes))})")
+        parametros.extend(fontes)
     sql = (
         "SELECT DISTINCT substr(booked, 1, 4) FROM cashflows WHERE "
         + " AND ".join(clausulas)
@@ -505,10 +537,10 @@ def rendimentos_por_ano(db, fonte: str | None) -> list[tuple[int, Decimal]]:
     anos = [int(ano) for (ano,) in db.execute(sql, parametros)]
     if not anos:
         return []
-    acumulado = _linha_rentabilidade(db, fonte, date(anos[0] - 1, 12, 31)).rendimentos
+    acumulado = rendimentos_ate(db, fonte, date(anos[0] - 1, 12, 31))
     resultado = []
     for ano in anos:
-        actual = _linha_rentabilidade(db, fonte, date(ano, 12, 31)).rendimentos
+        actual = rendimentos_ate(db, fonte, date(ano, 12, 31))
         resultado.append((ano, actual - acumulado))
         acumulado = actual
     return resultado
