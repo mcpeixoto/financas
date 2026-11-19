@@ -5,3 +5,4 @@ cd "$(dirname "$0")/.."
 mkdir -p data/logs
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"
 /opt/homebrew/bin/uv run --quiet financas run >> "data/logs/launchd-$(date +%Y-%m).log" 2>&1
+/opt/homebrew/bin/uv run --quiet financas relatorio --mensal >> "data/logs/launchd-$(date +%Y-%m).log" 2>&1

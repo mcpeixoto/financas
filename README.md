@@ -34,6 +34,9 @@ Para cada fonte: `uv run financas setup <fonte>`. A especificação de cada API 
 | Movimentos desde uma data | `scripts/atualizar.sh --since 2026-01-01` |
 | Estado (segredos, consentimentos, última corrida) | `uv run financas status` |
 | (Re)configurar uma fonte | `uv run financas setup <fonte>` |
+| Relatório da semana anterior | `uv run financas relatorio --semanal` |
+| Relatório do mês anterior | `uv run financas relatorio --mensal` |
+| Os mesmos, com euros | `uv run financas relatorio --semanal --com-valores` |
 | Testes | `uv run pytest -q` |
 
 Por omissão, `--since` é o dia 1 do mês anterior. Os movimentos não se duplicam (a chave é `(source, ext_id)`).
@@ -104,6 +107,14 @@ O TCC não deixa o launchd ler `~/Documents` diretamente. Por isso o agente abre
 3. Carregar: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.financas.plist`.
 4. Testar: `launchctl kickstart -k gui/$(id -u)/local.financas`.
 
+O relatório da semana anterior corre à segunda-feira, às 09:00. O launchd abre um applet, como no relatório mensal.
+
+1. Criar o applet: `osacompile -o ~/Applications/FinancasSemanal.app -e 'do shell script "/bin/zsh <repo>/scripts/run_semanal.sh"'`.
+2. Copiar `scripts/local.financas.semanal.plist` para `~/Library/LaunchAgents/` e trocar `__HOME__` pelo teu `$HOME`.
+3. Carregar: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.financas.semanal.plist`.
+
+`scripts/run_semanal.sh` atualiza o Santander e o Revolut (`financas run --only santander,revolut --no-notify`) e gera o HTML da semana (`financas relatorio --semanal`). No dia 2, `scripts/run_monthly.sh` gera também o relatório do mês anterior (`financas relatorio --mensal`). Os ficheiros ficam em `../Investimentos/Relatorios/`.
+
 ## Quando uma fonte falha
 
 As outras fontes correm na mesma. A que falhou fica com estado `precisa de ti: …` ou `erro: …`, com o comando a correr.
@@ -118,7 +129,8 @@ src/financas/
   store.py       SQLite
   fx.py          BCE + BTC
   report.py      Markdown + Excel
-  cli.py         financas run | setup | status
+  cli.py         financas run | setup | status | relatorio
+  relatorios.py  HTML semanal e mensal
   connectors/    um módulo por fonte: NAME, SECRETS, fetch(since) -> FetchResult, setup() opcional
 ```
 

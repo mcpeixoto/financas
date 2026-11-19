@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import re
 import subprocess
 import sys
 import traceback
@@ -55,8 +56,39 @@ def _parse_since(value: str) -> date:
         raise argparse.ArgumentTypeError("data inválida, usa AAAA-MM-DD") from exc
 
 
+_SEMANA = re.compile(r"^(\d{4})-W(\d{2})$")
+
+
+def _parse_semana(value: str) -> str:
+    match = _SEMANA.fullmatch(value.strip())
+    if match is None:
+        raise argparse.ArgumentTypeError("semana inválida, usa AAAA-Wnn")
+    ano, semana = int(match.group(1)), int(match.group(2))
+    try:
+        date.fromisocalendar(ano, semana, 1)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("semana inválida, usa AAAA-Wnn") from exc
+    return f"{ano:04d}-W{semana:02d}"
+
+
+def _parse_mes(value: str) -> str:
+    try:
+        parsed = datetime.strptime(value.strip(), "%Y-%m")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("mês inválido, usa AAAA-MM") from exc
+    return f"{parsed.year:04d}-{parsed.month:02d}"
+
+
 def _escape_applescript(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def notificar(mensagem: str) -> None:
+    text = _escape_applescript(mensagem)
+    subprocess.run(
+        ["osascript", "-e", f'display notification "{text}" with title "Finanças"'],
+        check=False,
+    )
 
 
 def _notify(total: Decimal, attention: int) -> None:
@@ -64,11 +96,7 @@ def _notify(total: Decimal, attention: int) -> None:
         phrase = "1 conector precisa de atenção"
     else:
         phrase = f"{attention} conectores precisam de atenção"
-    text = _escape_applescript(f"Total {format_eur(total)}. {phrase}.")
-    subprocess.run(
-        ["osascript", "-e", f'display notification "{text}" with title "Finanças"'],
-        check=False,
-    )
+    notificar(f"Total {format_eur(total)}. {phrase}.")
 
 
 def _log_exception(log_path, name: str) -> None:
@@ -301,6 +329,23 @@ def _last_status(db, source: str) -> str:
     return row[0]
 
 
+def cmd_relatorio(semanal: bool, semana: str | None, mes: str | None, com_valores: bool) -> int:
+    from financas import relatorios
+
+    db = store.connect(config.DATA / "financas.db")
+    pasta = config.CONTABILIDADE / "Investimentos" / "Relatorios"
+    try:
+        if semanal:
+            caminho = relatorios.escrever_semanal(db, semana, com_valores, pasta)
+        else:
+            caminho = relatorios.escrever_mensal(db, mes, com_valores, pasta)
+    finally:
+        db.close()
+    print(f"Relatório: {caminho}")
+    notificar(str(caminho))
+    return 0
+
+
 def cmd_dashboard(porta: int) -> int:
     """Abre o dashboard Streamlit só em 127.0.0.1."""
     app = Path(__file__).resolve().parent / "dashboard" / "app.py"
@@ -379,7 +424,21 @@ def main(argv: list[str] | None = None) -> int:
     dashboard = sub.add_parser("dashboard", help="abrir o dashboard local")
     dashboard.add_argument("--porta", type=int, default=8501)
 
+    relatorio = sub.add_parser("relatorio", help="gerar o relatório semanal ou mensal em HTML")
+    modo = relatorio.add_mutually_exclusive_group(required=True)
+    modo.add_argument("--semanal", action="store_true", help="semana ISO; omissão: a anterior")
+    modo.add_argument("--mensal", action="store_true", help="mês civil; omissão: o anterior")
+    relatorio.add_argument("--semana", type=_parse_semana, help="AAAA-Wnn")
+    relatorio.add_argument("--mes", type=_parse_mes, help="AAAA-MM")
+    relatorio.add_argument("--com-valores", action="store_true", help="mostrar montantes em euros")
+
     args = parser.parse_args(argv)
+    if args.cmd == "relatorio":
+        if args.semanal and args.mes is not None:
+            parser.error("--mes só vale com --mensal")
+        if args.mensal and args.semana is not None:
+            parser.error("--semana só vale com --semanal")
+        return cmd_relatorio(args.semanal, args.semana, args.mes, args.com_valores)
     if args.cmd == "run":
         return cmd_run(args.only, args.since, notify=not args.no_notify)
     if args.cmd == "backfill":
