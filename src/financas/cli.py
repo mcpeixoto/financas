@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from financas import config, precos, secrets, store
+from financas.categorias import escrever_resumo, resumir
 from financas.connectors import enablebanking
 from financas.fx import Rates
 from financas.models import NeedsUserAction
@@ -298,6 +299,12 @@ def _last_status(db, source: str) -> str:
     return row[0]
 
 
+def cmd_categorias(sem_categoria: bool, desde: date | None) -> int:
+    db = store.connect(config.DATA / "financas.db")
+    escrever_resumo(resumir(db, desde), sem_categoria)
+    return 0
+
+
 def cmd_status() -> int:
     db = store.connect(config.DATA / "financas.db")
     ensure_run_status(db)
@@ -338,6 +345,14 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="segredos, configuração e última corrida")
 
+    categorias = sub.add_parser("categorias", help="percentagem dos gastos por categoria")
+    categorias.add_argument(
+        "--sem-categoria",
+        action="store_true",
+        help="lista as descrições em Outros, com contagem e sem valores",
+    )
+    categorias.add_argument("--desde", type=_parse_since, help="AAAA-MM-DD")
+
     args = parser.parse_args(argv)
     if args.cmd == "run":
         return cmd_run(args.only, args.since, notify=not args.no_notify)
@@ -347,6 +362,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.start or args.finish:
             return cmd_bank_auth(args.name, args.start, args.finish)
         return cmd_setup(args.name)
+    if args.cmd == "categorias":
+        return cmd_categorias(args.sem_categoria, args.desde)
     return cmd_status()
 
 

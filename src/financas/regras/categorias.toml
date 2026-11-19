@@ -1,0 +1,72 @@
+# Regras genéricas (Portugal). A primeira que bate na descrição ganha.
+# As pessoais, em data/categorias.toml, são avaliadas antes destas.
+
+[[regra]]
+categoria = "Investimento"
+tipo = "investimento"
+padrao = 'interactive brokers|ibkr|trade republic|etoro|degiro|xtb|aforro|igcp|coinbase|kraken|binance|bitpanda'
+
+[[regra]]
+categoria = "Transferência interna"
+tipo = "interna"
+padrao = 'transfer to|transfer[eê]ncia para conta pr[oó]pria|top-up|carregamento'
+
+[[regra]]
+categoria = "Receita"
+tipo = "receita"
+padrao = 'vencimento|sal[aá]rio|ordenado|transfer[eê]ncia recebida'
+
+[[regra]]
+categoria = "Tecnologia e subscrições"
+tipo = "gasto"
+padrao = 'apple\.com|google|netflix|spotify|github|openai|anthropic|cursor|microsoft|adobe|amazon prime|x corp'
+
+[[regra]]
+categoria = "Restauração"
+tipo = "gasto"
+padrao = 'mcdonalds|telepizza|burger king|pastelaria|restaurante|caf[eé]|uber eats|glovo|bolt food'
+
+[[regra]]
+categoria = "Viagens"
+tipo = "gasto"
+padrao = 'ryanair|easyjet|tap |booking|airbnb|hotel|revolut travel'
+
+[[regra]]
+categoria = "Supermercado"
+tipo = "gasto"
+padrao = 'continente|pingo doce|lidl|aldi|auchan|mercadona|minipre[cç]o|intermarch|el corte'
+
+[[regra]]
+categoria = "Transportes"
+tipo = "gasto"
+padrao = 'repsol|galp|bp |cepsa|prio|via verde|cp |metro|carris|uber|bolt|portagens'
+
+[[regra]]
+categoria = "Casa"
+tipo = "gasto"
+padrao = 'ikea|leroy merlin|aki |worten'
+
+[[regra]]
+categoria = "Saúde"
+tipo = "gasto"
+padrao = 'farm[aá]cia|cl[ií]nica|hospital|gin[aá]sio|fitness'
+
+[[regra]]
+categoria = "Compras"
+tipo = "gasto"
+padrao = 'zara|primark|fnac|amazon|decathlon'
+
+[[regra]]
+categoria = "Lazer"
+tipo = "gasto"
+padrao = 'cinema|nos cinemas|teatro|ticketline'
+
+[[regra]]
+categoria = "Levantamentos"
+tipo = "gasto"
+padrao = 'levantamento|atm|numer[aá]rio'
+
+[[regra]]
+categoria = "Comissões e impostos"
+tipo = "gasto"
+padrao = 'comiss|imposto|selo|at -'
