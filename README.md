@@ -38,6 +38,30 @@ Para cada fonte: `uv run financas setup <fonte>`. A especificação de cada API 
 
 Por omissão, `--since` é o dia 1 do mês anterior. Os movimentos não se duplicam (a chave é `(source, ext_id)`).
 
+## Dashboard
+
+O dashboard local mostra o património, os gastos, os investimentos e os movimentos. Fica só em `http://127.0.0.1:8501`.
+
+```bash
+uv run financas dashboard
+uv run financas dashboard --porta 8502
+```
+
+Na barra lateral, «Esconder valores» vem ligado: os gráficos passam a percentagens e a índices com base 100, e nenhum montante em euros aparece. Desliga-o para ver os valores.
+
+Há quatro páginas:
+
+- **Resumo** — património, variação desde o snapshot anterior e há 30 dias, alocação e avisos da última corrida;
+- **Gastos** — categorias, comerciantes, subscrições, dia da semana e taxa de poupança;
+- **Investimentos** — depositado, valor, ganho e XIRR por plataforma, contra o MSCI World (IWDA.UK);
+- **Movimentos** — filtros e correção de categoria, que grava uma regra no início de `data/categorias.toml`.
+
+Para o deixar sempre a correr no macOS, o launchd abre um applet. O TCC não deixa o agente ler `~/Documents` diretamente.
+
+1. Criar o applet: `osacompile -o ~/Applications/FinancasDashboard.app -e 'do shell script "/bin/zsh <repo>/scripts/run_dashboard.sh"'`.
+2. Copiar `scripts/local.financas.dashboard.plist` para `~/Library/LaunchAgents/` e trocar `__HOME__` pelo teu `$HOME`.
+3. Carregar: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.financas.dashboard.plist`.
+
 ## Dados privados
 
 Tudo o que é pessoal fica em `data/`, que está no `.gitignore`:

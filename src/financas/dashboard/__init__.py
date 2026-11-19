@@ -1,0 +1,1 @@
+"""Dashboard local em Streamlit."""
