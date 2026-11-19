@@ -282,12 +282,42 @@ def _signed_amount(tx: dict) -> Decimal:
     return amount
 
 
-def _transactions(client: EBClient, name: str, uid: str, label: str, since: date) -> list[Transaction]:
-    params: dict[str, str] = {"date_from": since.isoformat()}
+def _datas_de_movimentos(since: date) -> list[date]:
+    """Janelas cada vez mais curtas, para bancos que recusam um date_from antigo."""
+    hoje = date.today()
+    ordenadas = [
+        since,
+        max(since, hoje - timedelta(days=730)),
+        hoje - timedelta(days=365),
+        hoje - timedelta(days=179),
+        hoje - timedelta(days=89),
+    ]
+    unicas: list[date] = []
+    for dia in ordenadas:
+        if dia not in unicas:
+            unicas.append(dia)
+    return unicas
+
+
+def _transactions(client: EBClient, name: str, uid: str, label: str, since: date) -> tuple[list[Transaction], date]:
+    candidatos = _datas_de_movimentos(since)
+    escolha = 0
+    params: dict[str, str] = {"date_from": candidatos[0].isoformat()}
     found: list[Transaction] = []
     per_day: dict[date, int] = {}
     while True:
-        payload = client.get(f"/accounts/{uid}/transactions", params=params)
+        try:
+            payload = client.get(f"/accounts/{uid}/transactions", params=params)
+        except httpx.HTTPStatusError as exc:
+            if (
+                exc.response.status_code in (400, 422)
+                and "continuation_key" not in params
+                and escolha + 1 < len(candidatos)
+            ):
+                escolha += 1
+                params = {"date_from": candidatos[escolha].isoformat()}
+                continue
+            raise
         for tx in payload.get("transactions") or []:
             if str(tx.get("status") or "").upper() != "BOOK":
                 continue
@@ -322,8 +352,8 @@ def _transactions(client: EBClient, name: str, uid: str, label: str, since: date
         token = payload.get("continuation_key") if isinstance(payload, dict) else None
         if not token:
             break
-        params = {"date_from": since.isoformat(), "continuation_key": str(token)}
-    return found
+        params = {"date_from": candidatos[escolha].isoformat(), "continuation_key": str(token)}
+    return found, candidatos[escolha]
 
 
 def fetch_bank(name: str, since: date) -> FetchResult:
@@ -365,5 +395,11 @@ def fetch_bank(name: str, since: date) -> FetchResult:
                     kind="cash",
                 )
             )
-        transactions.extend(_transactions(client, name, uid, label, since))
+        movimentos, efetiva = _transactions(client, name, uid, label, since)
+        transactions.extend(movimentos)
+        if efetiva != since:
+            banco = name[:1].upper() + name[1:]
+            aviso = f"{banco}: o banco só deu movimentos desde {efetiva.isoformat()}"
+            if aviso not in warnings:
+                warnings.append(aviso)
     return FetchResult(source=name, balances=balances, transactions=transactions, warnings=warnings)

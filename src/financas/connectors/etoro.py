@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import httpx
 
-from financas import secrets
+from financas import config, secrets
 from financas.fx import Rates
 from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Position, Transaction
 
@@ -20,6 +20,10 @@ SECRETS = {
 }
 BASE = "https://public-api.etoro.com/api/v1"
 _PAGE_SIZE = 100
+_AVISO_DEPOSITOS = (
+    "eToro: sem depósitos configurados; a rentabilidade do eToro não pode ser calculada "
+    "(config etoro.depositos)"
+)
 
 
 def _today() -> date:
@@ -307,6 +311,10 @@ def fetch(since: date, _sleep=None) -> FetchResult:
             )
         )
     cashflows = _cashflows(cash_rows, since, warnings)
+    manuais, aviso = _depositos_manuais(since)
+    if aviso is not None and aviso not in warnings:
+        warnings.append(aviso)
+    cashflows.extend(manuais)
     return FetchResult(
         source=NAME,
         balances=balances,
@@ -315,6 +323,43 @@ def fetch(since: date, _sleep=None) -> FetchResult:
         warnings=warnings,
         cashflows=cashflows,
     )
+
+
+def _depositos_manuais(since: date) -> tuple[list[Cashflow], str | None]:
+    """Depósitos escritos em config, porque a API pública não os devolve."""
+    raw = config.section(NAME).get("depositos")
+    if not isinstance(raw, list) or not raw:
+        return [], _AVISO_DEPOSITOS
+    found: list[Cashflow] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict) or "data" not in item or "valor_eur" not in item:
+            continue
+        booked = _as_date(item.get("data"))
+        if booked is None or booked < since:
+            continue
+        try:
+            valor = _dec(item.get("valor_eur"))
+        except (TypeError, ValueError, ArithmeticError):
+            continue
+        if valor == 0:
+            continue
+        kind = "deposito" if valor > 0 else "levantamento"
+        ext_id = f"manual-{booked.isoformat()}-{_plain(valor)}"
+        if ext_id in seen:
+            continue
+        seen.add(ext_id)
+        found.append(
+            Cashflow(
+                source=NAME,
+                booked=booked,
+                amount_eur=valor,
+                kind=kind,
+                description="Depósito manual" if kind == "deposito" else "Levantamento manual",
+                ext_id=ext_id,
+            )
+        )
+    return found, None
 
 
 def _etoro_kind(raw: str) -> str | None:

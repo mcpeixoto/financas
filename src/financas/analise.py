@@ -238,7 +238,7 @@ def rentabilidade(db, source: str | None = None, ate: date | None = None) -> lis
     return linhas
 
 
-def benchmark(db, source: str | None = None, symbol: str = "IWDA.UK", fx=None, ate: date | None = None) -> Benchmark:
+def benchmark(db, source: str | None = None, symbol: str = "IWDA.AS", fx=None, ate: date | None = None) -> Benchmark:
     """E se cada depósito e levantamento tivesse comprado ou vendido ``symbol``.
 
     Usa o preço desse dia ou, se faltar, o do dia anterior mais próximo.
