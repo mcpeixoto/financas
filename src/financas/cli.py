@@ -4,9 +4,11 @@ from __future__ import annotations
 import argparse
 import importlib
 import subprocess
+import sys
 import traceback
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from financas import config, precos, secrets, store
 from financas.categorias import escrever_resumo, resumir
@@ -299,6 +301,27 @@ def _last_status(db, source: str) -> str:
     return row[0]
 
 
+def cmd_dashboard(porta: int) -> int:
+    """Abre o dashboard Streamlit só em 127.0.0.1."""
+    app = Path(__file__).resolve().parent / "dashboard" / "app.py"
+    comando = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app),
+        "--server.address",
+        "127.0.0.1",
+        "--server.port",
+        str(porta),
+        "--server.headless",
+        "true",
+        "--browser.gatherUsageStats",
+        "false",
+    ]
+    return subprocess.run(comando, check=False).returncode
+
+
 def cmd_categorias(sem_categoria: bool, desde: date | None) -> int:
     db = store.connect(config.DATA / "financas.db")
     escrever_resumo(resumir(db, desde), sem_categoria)
@@ -353,6 +376,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     categorias.add_argument("--desde", type=_parse_since, help="AAAA-MM-DD")
 
+    dashboard = sub.add_parser("dashboard", help="abrir o dashboard local")
+    dashboard.add_argument("--porta", type=int, default=8501)
+
     args = parser.parse_args(argv)
     if args.cmd == "run":
         return cmd_run(args.only, args.since, notify=not args.no_notify)
@@ -364,6 +390,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_setup(args.name)
     if args.cmd == "categorias":
         return cmd_categorias(args.sem_categoria, args.desde)
+    if args.cmd == "dashboard":
+        return cmd_dashboard(args.porta)
     return cmd_status()
 
 
