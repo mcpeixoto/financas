@@ -132,9 +132,14 @@ def resumir(db, desde: date | None = None, regras: Regras | None = None) -> Resu
             "SELECT source, account, description, amount FROM transactions WHERE booked >= ?",
             (desde.isoformat(),),
         )
+    from financas.analise import fontes_bancarias
+
+    bancarias = set(fontes_bancarias())
     totais: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
     outros: Counter[str] = Counter()
     for source, account, description, amount in linhas:
+        if source not in bancarias:
+            continue
         valor = Decimal(amount)
         classe = classify(source, account or "", description or "", valor, regras)
         if classe.categoria == "Outros":
