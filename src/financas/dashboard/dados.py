@@ -301,6 +301,15 @@ def _variacao_texto(atual: Decimal, base: Decimal) -> str:
     return formatar_percentagem((atual - base) / base)
 
 
+def _texto_percentagem(linha, nome: str, atual: Decimal, base: Decimal) -> str:
+    if getattr(linha, "com_percentagem", False):
+        valor = getattr(linha, nome)
+        if valor is None:
+            return "—"
+        return formatar_percentagem(valor)
+    return _variacao_texto(atual, base)
+
+
 def apresentar_comparacao(linhas, esconder: bool) -> list[ComparacaoVista]:
     return [
         ComparacaoVista(
@@ -308,8 +317,8 @@ def apresentar_comparacao(linhas, esconder: bool) -> list[ComparacaoVista]:
             mostrar_montante(linha.este_mes, esconder),
             mostrar_montante(linha.mes_anterior, esconder),
             mostrar_montante(linha.media_3_meses, esconder),
-            _variacao_texto(linha.este_mes, linha.mes_anterior),
-            _variacao_texto(linha.este_mes, linha.media_3_meses),
+            _texto_percentagem(linha, "vs_anterior", linha.este_mes, linha.mes_anterior),
+            _texto_percentagem(linha, "vs_media", linha.este_mes, linha.media_3_meses),
         )
         for linha in linhas
     ]

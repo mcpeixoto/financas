@@ -23,6 +23,9 @@ _CAPITAL = {"deposito", "levantamento"}
 _RENDIMENTO = {"dividendo", "juros"}
 _MENSAL = (25, 35)
 _ANUAL = (350, 380)
+_FOLGA_SNAPSHOT = 10
+_LIMITE_REFERENCIA = Decimal("0.05")
+NOTA_SEM_SNAPSHOT = "Sem snapshot perto do fim do período."
 _REF = re.compile(r"\b(?:refs?|refer[eê]ncias?|references?|trx)\b\.?", re.IGNORECASE)
 _FALTA = object()
 
@@ -67,6 +70,9 @@ class ComparacaoCategoria:
     este_mes: Decimal
     mes_anterior: Decimal
     media_3_meses: Decimal
+    vs_anterior: Decimal | None = None
+    vs_media: Decimal | None = None
+    com_percentagem: bool = False
 
 
 @dataclass(frozen=True)
@@ -148,7 +154,7 @@ def top_comerciantes(db, inicio: date, fim: date, n: int = 10, classify=None) ->
     """Os ``n`` comerciantes com mais gastos, depois de normalizar a descrição."""
     grupos: dict[str, list] = {}
     for movimento in _gastos(db, classify, inicio, fim):
-        if not movimento.comerciante:
+        if movimento.eur >= 0 or not movimento.comerciante:
             continue
         valor = abs(movimento.eur)
         chave = movimento.comerciante.casefold()
@@ -168,7 +174,7 @@ def subscricoes(db, ate: date, classify=None) -> list[Subscricao]:
     """Comerciante repetido, valor a ±10% e intervalo mensal ou anual, em pelo menos 2 vezes."""
     grupos: dict[str, list[tuple[date, Decimal, str]]] = {}
     for movimento in _gastos(db, classify, None, ate):
-        if not movimento.comerciante:
+        if movimento.eur >= 0 or not movimento.comerciante:
             continue
         chave = movimento.comerciante.casefold()
         grupos.setdefault(chave, []).append((movimento.booked, abs(movimento.eur), movimento.comerciante))
@@ -210,7 +216,11 @@ def taxa_poupanca(db, inicio: date, fim: date, classify=None) -> Decimal | None:
 
 
 def comparacao_mes(db, mes: date, classify=None) -> list[ComparacaoCategoria]:
-    """Por categoria: este mês, o mês anterior e a média dos 3 meses anteriores."""
+    """Por categoria: este mês, o mês anterior e a média dos 3 meses anteriores.
+
+    A percentagem fica ``None`` quando a referência é menor que 5% do mês atual,
+    ou quando o histórico bancário não cobre o dia 1 desse período.
+    """
     inicio_mes = date(mes.year, mes.month, 1)
     meses = [_somar_meses(inicio_mes, deslocamento) for deslocamento in range(-3, 1)]
     indice = {(dia.year, dia.month): posicao for posicao, dia in enumerate(meses)}
@@ -223,13 +233,24 @@ def comparacao_mes(db, mes: date, classify=None) -> list[ComparacaoCategoria]:
         valores = somas.setdefault(movimento.categoria, [Decimal(0)] * 4)
         valores[posicao] += abs(movimento.eur)
 
+    primeiro = _primeiro_movimento_bancario(db)
     linhas = []
     for categoria in sorted(somas):
         valores = somas[categoria]
         if all(valor == 0 for valor in valores):
             continue
         media = (valores[0] + valores[1] + valores[2]) / Decimal(3)
-        linhas.append(ComparacaoCategoria(categoria, valores[3], valores[2], media))
+        linhas.append(
+            ComparacaoCategoria(
+                categoria,
+                valores[3],
+                valores[2],
+                media,
+                _percentagem_contra(valores[3], valores[2], _periodo_incompleto(primeiro, meses[2])),
+                _percentagem_contra(valores[3], media, _periodo_incompleto(primeiro, meses[0])),
+                True,
+            )
+        )
     return linhas
 
 
@@ -301,12 +322,17 @@ def benchmark(
         ]
     cache: dict[tuple[date, str], Decimal] = {}
 
-    def preco_eur(dia: date) -> Decimal | None:
+    def preco_eur(dia: date, folga_dias: int = 0) -> Decimal | None:
         escolhido = None
+        seguinte = None
         for cotacao_dia, close, moeda in precos:
-            if cotacao_dia > dia:
+            if cotacao_dia <= dia:
+                escolhido = (cotacao_dia, close, moeda)
+            else:
+                seguinte = (cotacao_dia, close, moeda)
                 break
-            escolhido = (cotacao_dia, close, moeda)
+        if escolhido is None and seguinte is not None and (seguinte[0] - dia).days <= folga_dias:
+            escolhido = seguinte
         if escolhido is None:
             return None
         cotacao_dia, close, moeda = escolhido
@@ -336,7 +362,13 @@ def benchmark(
         fluxos.append((booked, -amount))
 
     valor = Decimal(0)
-    if dia_valor is not None:
+    if ate is not None:
+        preco_final = preco_eur(ate, _FOLGA_SNAPSHOT)
+        if preco_final is None:
+            return Benchmark(symbol, unidades, Decimal(0), None, depositado)
+        valor = unidades * preco_final
+        fluxos.append((ate, valor))
+    elif dia_valor is not None:
         preco_final = preco_eur(dia_valor)
         if preco_final is not None:
             valor = unidades * preco_final
@@ -666,6 +698,34 @@ def _somar_meses(dia: date, meses: int) -> date:
     return date(dia.year + absoluto // 12, absoluto % 12 + 1, 1)
 
 
+def _primeiro_movimento_bancario(db) -> date | None:
+    """Primeiro movimento das contas que entram nos gastos. Outras fontes não contam."""
+    fontes = fontes_bancarias()
+    if not fontes:
+        return None
+    marcas = ",".join("?" * len(fontes))
+    linha = db.execute(
+        f"SELECT MIN(booked) FROM transactions WHERE source IN ({marcas})",
+        tuple(fontes),
+    ).fetchone()
+    if linha is None or linha[0] is None:
+        return None
+    return _como_data(linha[0])
+
+
+def _periodo_incompleto(primeiro: date | None, inicio: date) -> bool:
+    """Sem movimento bancário no dia 1, o período não serve de base a uma percentagem."""
+    return primeiro is None or primeiro > inicio
+
+
+def _percentagem_contra(atual: Decimal, referencia: Decimal, incompleto: bool) -> Decimal | None:
+    if incompleto or referencia == 0:
+        return None
+    if atual > 0 and referencia < atual * _LIMITE_REFERENCIA:
+        return None
+    return (atual - referencia) / referencia
+
+
 def _totais_do_run(db, run_id: int) -> dict[str, Decimal]:
     por_fonte: dict[str, Decimal] = {}
     for source, amount in db.execute("SELECT source, amount_eur FROM balances WHERE run_id = ?", (run_id,)):
@@ -804,6 +864,8 @@ def _rentabilidade_de(db, fonte: str, ate: date | None) -> Rentabilidade:
             None,
             "sem dados de depósitos",
         )
+    if ate is not None and dia_valor is None:
+        return _sem_valor(fonte, depositos - levantamentos, rendimentos)
     return _montar_rentabilidade(fonte, depositos, levantamentos, rendimentos, valor, dia_valor, fluxos, "")
 
 
@@ -830,6 +892,8 @@ def _rentabilidade_total(db, fontes: list[str], ate: date | None) -> Rentabilida
     nota = _nota_total(incluidas)
     if not incluidas:
         return Rentabilidade("total", Decimal(0), Decimal(0), Decimal(0), Decimal(0), None, None, nota)
+    if ate is not None and dia_valor is None:
+        return _sem_valor("total", depositos - levantamentos, rendimentos)
     return _montar_rentabilidade(
         "total", depositos, levantamentos, rendimentos, valor, dia_valor, fluxos, nota
     )
@@ -902,7 +966,8 @@ def _tem_deposito(db, fonte: str, ate: date | None) -> bool:
 
 
 def _valor_da_fonte(db, fonte: str, ate: date | None) -> tuple[Decimal, date | None]:
-    return _valor_ate(_snapshots_valor(db, fonte), ate)
+    folga = _FOLGA_SNAPSHOT if ate is not None else 0
+    return _valor_ate(_snapshots_valor(db, fonte), ate, folga)
 
 
 def _snapshots_valor(db, fonte: str) -> list[tuple[date, Decimal]]:
@@ -927,15 +992,38 @@ def _snapshots_valor(db, fonte: str) -> list[tuple[date, Decimal]]:
     return sorted((dia, total) for dia, (_run, total) in por_dia.items())
 
 
-def _valor_ate(snapshots, dia: date | None) -> tuple[Decimal, date | None]:
-    escolhido = None
-    for quando, total in snapshots:
-        if dia is not None and quando > dia:
-            break
-        escolhido = (quando, total)
-    if escolhido is None:
+def _valor_ate(snapshots, dia: date | None, folga_dias: int = 0) -> tuple[Decimal, date | None]:
+    """Último snapshot até ao dia. Se não houver, o mais próximo a seguir, até ``folga_dias``."""
+    if not snapshots:
         return Decimal(0), None
-    return escolhido[1], escolhido[0]
+    if dia is None:
+        return snapshots[-1][1], snapshots[-1][0]
+    escolhido = None
+    seguinte = None
+    for quando, total in snapshots:
+        if quando <= dia:
+            escolhido = (quando, total)
+        else:
+            seguinte = (quando, total)
+            break
+    if escolhido is not None:
+        return escolhido[1], escolhido[0]
+    if seguinte is not None and (seguinte[0] - dia).days <= folga_dias:
+        return seguinte[1], seguinte[0]
+    return Decimal(0), None
+
+
+def _sem_valor(fonte: str, depositado: Decimal, rendimentos: Decimal) -> Rentabilidade:
+    return Rentabilidade(
+        fonte,
+        depositado,
+        rendimentos,
+        Decimal(0),
+        Decimal(0),
+        None,
+        None,
+        NOTA_SEM_SNAPSHOT,
+    )
 
 
 def _fontes_investimento(db, source: str | None, ate: date | None) -> list[str]:

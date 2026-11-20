@@ -90,6 +90,15 @@ def _primeira(descricao: str, regras: tuple[Regra, ...]) -> Classe | None:
     return None
 
 
+def _pelo_sinal(classe: Classe, amount: Decimal) -> Classe:
+    """Uma regra não pode contrariar o sinal do movimento."""
+    if classe.tipo == "gasto" and amount > 0:
+        return Classe("receita", "Reembolsos")
+    if classe.tipo == "receita" and amount < 0:
+        return Classe("gasto", "Outros")
+    return classe
+
+
 def _conta_propria(descricao: str, contas: tuple[str, ...]) -> bool:
     texto = descricao.casefold()
     return any(conta.casefold() in texto for conta in contas)
@@ -107,12 +116,12 @@ def classify(
     texto = description or ""
     encontrada = _primeira(texto, regras.pessoais)
     if encontrada is not None:
-        return encontrada
+        return _pelo_sinal(encontrada, amount)
     if _conta_propria(texto, regras.contas_proprias):
         return Classe("interna", CATEGORIA_INTERNA)
     encontrada = _primeira(texto, regras.genericas)
     if encontrada is not None:
-        return encontrada
+        return _pelo_sinal(encontrada, amount)
     tipo = "gasto" if amount < 0 else "receita"
     return Classe(tipo, "Outros")
 

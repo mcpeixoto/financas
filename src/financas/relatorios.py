@@ -9,6 +9,7 @@ from pathlib import Path
 import plotly.graph_objects as go
 
 from financas.analise import (
+    NOTA_SEM_SNAPSHOT,
     alocacao,
     benchmarks,
     comparacao_mes,
@@ -222,11 +223,19 @@ def _seccao_semanas(db, inicio: date, com_valores: bool) -> str:
     return _seccao("Vs média das 4 semanas anteriores", _tabela(colunas, linhas))
 
 
+def _limite_snapshot(fim: date) -> date:
+    """O relatório mensal corre no dia 2: o fecho pode cair até 10 dias depois."""
+    return fim + timedelta(days=10)
+
+
 def _seccao_variacao(db, inicio: date, fim: date, com_valores: bool) -> str:
     serie = patrimonio_serie(db)
-    dentro = [ponto for ponto in serie if inicio <= ponto[0] <= fim]
+    dentro = [ponto for ponto in serie if inicio <= ponto[0] <= _limite_snapshot(fim)]
     anteriores = [ponto for ponto in serie if ponto[0] < inicio]
-    if not dentro or not anteriores:
+    if not dentro:
+        texto = NOTA_SEM_SNAPSHOT if serie else "Sem snapshots neste período."
+        return _seccao("Variação do património", _p(texto))
+    if not anteriores:
         return _seccao("Variação do património", _p("Sem snapshots neste período."))
     base = anteriores[-1][2]
     total = dentro[-1][2]
@@ -266,7 +275,7 @@ def _seccao_comparacao(db, fim: date, esconder: bool) -> str:
 def _seccao_poupanca(db, inicio: date, fim: date) -> str:
     taxa = taxa_poupanca(db, inicio, fim)
     if taxa is None:
-        texto = "Sem receitas neste período."
+        texto = "—"
     else:
         texto = f"A taxa de poupança foi de {formatar_percentagem(taxa)}."
     return _seccao("Taxa de poupança", _p(texto))
@@ -325,7 +334,8 @@ def _seccao_rentabilidade(db, fim: date, com_valores: bool) -> str:
     else:
         colunas = ["Plataforma", "Ganho", "XIRR", "MSCI World", "Comparação"]
     intro = _p("Contra o MSCI World (IWDA.AS).")
-    corpo = intro + (_tabela(colunas, linhas) if linhas else _p("Sem plataformas para comparar."))
+    aviso = _p(NOTA_SEM_SNAPSHOT) if any(linha.nota == NOTA_SEM_SNAPSHOT for linha in linhas_rent) else ""
+    corpo = intro + aviso + (_tabela(colunas, linhas) if linhas else _p("Sem plataformas para comparar."))
     return _seccao("Rentabilidade", corpo)
 
 
@@ -344,9 +354,10 @@ def _seccao_alocacao(pagina: _Pagina, db, esconder: bool) -> str:
 
 
 def _seccao_evolucao(pagina: _Pagina, db, fim: date, esconder: bool) -> str:
-    fig = _evolucao(patrimonio_serie(db), fim, esconder)
+    serie = patrimonio_serie(db)
+    fig = _evolucao(serie, _limite_snapshot(fim), esconder)
     if fig is None:
-        corpo = _p("Sem snapshots neste período.")
+        corpo = _p(NOTA_SEM_SNAPSHOT if serie else "Sem snapshots neste período.")
     else:
         corpo = pagina.grafico(fig)
     return _seccao("Evolução do património", corpo)
