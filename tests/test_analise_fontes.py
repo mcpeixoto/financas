@@ -286,24 +286,3 @@ def test_benchmark_le_a_tabela_de_precos_uma_vez(tmp_path):
     assert [item.unidades for item in resultados] == [Decimal("13"), Decimal("10"), Decimal("3")]
 
 
-def test_resumo_nao_salta_o_indice_e_avisa_o_preenchimento(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DATA", tmp_path)
-    db = store.connect(tmp_path / "financas.db")
-    primeiro = store.new_run(db, at=datetime(2026, 1, 1, 9, 0, 0))
-    _saldo(db, primeiro, "santander", Decimal("100"))
-    segundo = store.new_run(db, at=datetime(2026, 2, 1, 9, 0, 0))
-    _saldo(db, segundo, "santander", Decimal("100"))
-    _posicao(db, segundo, "ibkr", Decimal("50"))
-    db.commit()
-    db.close()
-
-    from streamlit.testing.v1 import AppTest
-
-    from financas.dashboard.paginas.resumo import pagina
-
-    app = AppTest.from_function(pagina, default_timeout=30).run()
-    assert list(app.exception) == []
-    por_nome = {metrica.label: metrica.value for metrica in app.metric}
-    assert por_nome["Património"] == "100,0"
-    assert por_nome["Desde o snapshot anterior"] == "0,0%"
-    assert any("primeiro valor conhecido" in nota.value for nota in app.caption)

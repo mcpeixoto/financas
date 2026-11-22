@@ -441,104 +441,11 @@ def test_graficos_partilham_cores_fundo_transparente_e_mascara():
     assert "300,00 €" in mostradas.data[0].hovertext[0]
 
 
-def test_cli_dashboard_corre_streamlit_so_em_localhost(monkeypatch):
-    chamadas = []
-
-    def falso(args, check=False, **kwargs):
-        assert check is False
-        assert kwargs.get("shell") is not True
-        assert isinstance(args, list)
-        chamadas.append(list(args))
-        return subprocess.CompletedProcess(args, 0)
-
-    monkeypatch.setattr("financas.cli.subprocess.run", falso)
+def test_cli_dashboard_abre_a_pagina_local(monkeypatch):
+    portas = []
+    monkeypatch.setattr("financas.web.server.serve", lambda porta: portas.append(porta))
     from financas import cli
 
     assert cli.main(["dashboard"]) == 0
     assert cli.main(["dashboard", "--porta", "8502"]) == 0
-    portas = []
-    for args in chamadas:
-        assert "streamlit" in args
-        assert "run" in args
-        assert args[args.index("--server.address") + 1] == "127.0.0.1"
-        assert args[args.index("--server.headless") + 1] == "true"
-        assert args[args.index("--browser.gatherUsageStats") + 1] == "false"
-        assert any(str(parte).endswith("src/financas/dashboard/app.py") for parte in args)
-        portas.append(args[args.index("--server.port") + 1])
-    assert portas == ["8501", "8502"]
-
-
-def _textos(at) -> str:
-    partes = []
-    for elemento in (
-        *at.title,
-        *at.header,
-        *at.subheader,
-        *at.markdown,
-        *at.caption,
-        *at.info,
-        *at.warning,
-        *at.error,
-        *at.success,
-    ):
-        partes.append(elemento.value)
-    for metrica in at.metric:
-        partes.append(metrica.value)
-        partes.append(metrica.delta or "")
-    for tabela in (*at.dataframe, *at.table):
-        partes.append(tabela.value.to_csv(index=False))
-    return "\n".join(partes)
-
-
-def _pagina(nome):
-    from streamlit.testing.v1 import AppTest
-
-    modulo = __import__(f"financas.dashboard.paginas.{nome}", fromlist=["pagina"])
-    return AppTest.from_function(modulo.pagina, default_timeout=30).run()
-
-
-@pytest.mark.parametrize("nome", ["resumo", "gastos", "investimentos", "movimentos"])
-def test_pagina_sintetica_nao_tem_excecoes_nem_euros(nome, tmp_path, monkeypatch):
-    _semear_gastos(tmp_path, monkeypatch)
-    app = _pagina(nome)
-    assert list(app.exception) == []
-    visivel = _textos(app)
-    assert "€" not in visivel
-    assert visivel.strip() != ""
-
-
-def test_app_esconde_valores_por_omissao(tmp_path, monkeypatch):
-    _semear_gastos(tmp_path, monkeypatch)
-    from streamlit.testing.v1 import AppTest
-
-    from financas.dashboard.app import main
-
-    app = AppTest.from_function(main, default_timeout=30).run()
-    assert list(app.exception) == []
-    interruptores = list(app.sidebar.toggle)
-    assert len(interruptores) == 1
-    assert interruptores[0].label == "Esconder valores"
-    assert interruptores[0].value is True
-    assert "€" not in _textos(app)
-
-
-def test_movimentos_grava_regra_pela_pagina(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DATA", tmp_path)
-    db = _db(tmp_path)
-    _tx(db, date(2026, 11, 2), Decimal("-5"), "Padaria do Bairro 44")
-    db.commit()
-    from streamlit.testing.v1 import AppTest
-
-    from financas.dashboard.paginas.movimentos import pagina
-
-    app = AppTest.from_function(pagina, default_timeout=30).run()
-    assert list(app.exception) == []
-    app.selectbox(key="correcao_descricao").select("Padaria do Bairro 44")
-    app.selectbox(key="correcao_tipo").select("gasto")
-    app.text_input(key="correcao_categoria").input("Padaria")
-    app = app.button(key="guardar_regra").click().run()
-    assert list(app.exception) == []
-    documento = tomllib.loads((tmp_path / "categorias.toml").read_text(encoding="utf-8"))
-    assert documento["regra"][0]["categoria"] == "Padaria"
-    assert documento["regra"][0]["tipo"] == "gasto"
-    assert documento["regra"][0]["padrao"] == r"Padaria\ do\ Bairro"
+    assert portas == [8501, 8502]
