@@ -90,12 +90,13 @@ def test_yahoo_usa_o_close_quando_o_adjclose_falta(tmp_path):
     ]
 
 
-def test_benchmark_e_o_dashboard_usam_iwda_as_por_omissao():
+def test_benchmark_e_a_pagina_usam_iwda_as_por_omissao():
     from financas.analise import benchmark
-    from financas.dashboard.paginas.investimentos import pagina
+    from financas.dashboard.dados import montar_investimentos
 
     assert inspect.signature(benchmark).parameters["symbol"].default == "IWDA.AS"
-    origem = inspect.getsource(pagina)
+    assert inspect.signature(montar_investimentos).parameters["symbol"].default == "IWDA.AS"
+    origem = inspect.getsource(montar_investimentos)
     assert "IWDA.UK" not in origem
 
 

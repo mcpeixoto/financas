@@ -43,40 +43,33 @@ Por omissão, `--since` é o dia 1 do mês anterior. Os movimentos não se dupli
 
 ## Dashboard
 
-O dashboard local mostra o património, os gastos, os investimentos e os movimentos. Fica só em `http://127.0.0.1:8501`.
-
-```bash
-uv run financas dashboard
-uv run financas dashboard --porta 8502
-```
-
-Na barra lateral, «Esconder valores» vem ligado: os gráficos passam a percentagens e a índices com base 100, e nenhum montante em euros aparece. Desliga-o para ver os valores.
-
-Há quatro páginas:
-
-- **Resumo** — património, variação desde o snapshot anterior e há 30 dias, alocação e avisos da última corrida;
-- **Gastos** — categorias, comerciantes, subscrições, dia da semana e taxa de poupança;
-- **Investimentos** — depositado, valor, ganho e XIRR por plataforma, contra o MSCI World (IWDA.AS);
-- **Movimentos** — filtros e correção de categoria, que grava uma regra no início de `data/categorias.toml`.
-
-Para o deixar sempre a correr no macOS, o launchd abre um applet. O TCC não deixa o agente ler `~/Documents` diretamente.
-
-1. Criar o applet: `osacompile -o ~/Applications/FinancasDashboard.app -e 'do shell script "/bin/zsh <repo>/scripts/run_dashboard.sh"'`.
-2. Copiar `scripts/local.financas.dashboard.plist` para `~/Library/LaunchAgents/` e trocar `__HOME__` pelo teu `$HOME`.
-3. Carregar: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.financas.dashboard.plist`.
-
-## Página web
-
-A página em `http://127.0.0.1:8501` responde a três perguntas: quanto tenho e onde, se sou bom investidor, e para onde vai o dinheiro. Não usa o Streamlit, não precisa de build e funciona offline.
+O dashboard é uma página HTML própria, servida por um servidor local só em `http://127.0.0.1:8501`. Responde a três perguntas: quanto tenho e onde, se sou bom investidor, e para onde vai o dinheiro. Não precisa de build nem de internet: o servidor é a biblioteca padrão do Python e os gráficos usam o Plotly que vem com o pacote.
 
 ```bash
 uv run financas web
 uv run financas web --porta 8502
 ```
 
-Há seis separadores: Resumo, Investimentos, Posições, Gastos, Movimentos e Estado. «Esconder valores» vem ligado: só aparecem percentagens, pesos e índices com base 100. «Atualizar agora» corre `financas run --no-notify` em segundo plano. Corrigir a categoria de um movimento grava uma regra no início de `data/categorias.toml`.
+`financas dashboard` é o nome antigo do mesmo comando.
 
-O dashboard Streamlit continua disponível com `uv run financas dashboard`.
+Há seis separadores:
+
+- **Resumo** — património, variação, alocação, avisos e um veredicto em frases;
+- **Investimentos** — depositado, valor, ganho e XIRR por plataforma, contra o MSCI World (IWDA.AS);
+- **Posições** — ganho latente e realizado de cada posição, capital investido e valor de mercado ao longo do tempo, e estatísticas dos negócios fechados;
+- **Gastos** — categorias, comerciantes, subscrições, dia da semana e taxa de poupança;
+- **Movimentos** — pesquisa, filtros e correção de categoria, que grava uma regra no início de `data/categorias.toml`;
+- **Estado** — estado de cada fonte e validade dos consentimentos.
+
+«Esconder valores» vem ligado: só aparecem percentagens, pesos e índices com base 100. «Atualizar agora» corre `financas run --no-notify` em segundo plano.
+
+O servidor só aceita pedidos com `Host` local, e os pedidos que alteram dados exigem um cabeçalho próprio, para que nenhuma outra página aberta no browser lhe consiga falar.
+
+Para o deixar sempre a correr no macOS, o launchd abre um applet. O TCC não deixa o agente ler `~/Documents` diretamente.
+
+1. Criar o applet: `osacompile -o ~/Applications/FinancasDashboard.app -e 'do shell script "/bin/zsh <repo>/scripts/run_dashboard.sh"'`.
+2. Copiar `scripts/local.financas.dashboard.plist` para `~/Library/LaunchAgents/` e trocar `__HOME__` pelo teu `$HOME`.
+3. Carregar: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.financas.dashboard.plist`.
 
 ## Dados privados
 

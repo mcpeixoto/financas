@@ -362,24 +362,8 @@ def cmd_web(porta: int) -> int:
 
 
 def cmd_dashboard(porta: int) -> int:
-    """Abre o dashboard Streamlit só em 127.0.0.1."""
-    app = Path(__file__).resolve().parent / "dashboard" / "app.py"
-    comando = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        str(app),
-        "--server.address",
-        "127.0.0.1",
-        "--server.port",
-        str(porta),
-        "--server.headless",
-        "true",
-        "--browser.gatherUsageStats",
-        "false",
-    ]
-    return subprocess.run(comando, check=False).returncode
+    """Nome antigo de `financas web`: a página local substituiu o Streamlit."""
+    return cmd_web(porta)
 
 
 def cmd_categorias(sem_categoria: bool, desde: date | None) -> int:
