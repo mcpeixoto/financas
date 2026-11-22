@@ -78,7 +78,7 @@ def test_1003_no_ano_mais_recente_propaga(monkeypatch):
 
     with pytest.raises(NeedsUserAction, match="1003"):
         ibkr.fetch_history(date(2024, 1, 1), today=date(2026, 11, 19))
-    assert pedidos == ["20260101"]
+    assert pedidos == ["20260101"] * 5  # recua 5 dias antes de desistir
 
 
 @respx.mock

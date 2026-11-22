@@ -520,6 +520,23 @@ def fetch(since: date, *, fd: date | None = None, td: date | None = None) -> Fet
     return result
 
 
+def _download_recuando(start: date, end: date, tentativas: int = 5) -> tuple[FetchResult, bool]:
+    """Ao fim de semana e em feriados o extrato do último dia não existe (erro 1003).
+
+    Recua o fim do período um dia de cada vez até o IBKR ter extrato.
+    """
+    for recuo in range(tentativas):
+        fim = end - timedelta(days=recuo)
+        if fim < start:
+            break
+        try:
+            return _download(start, start, fim)
+        except NeedsUserAction as exc:
+            if "1003" not in str(exc) or recuo == tentativas - 1:
+                raise
+    raise NeedsUserAction("O IBKR devolveu o erro 1003. Confirme o token e a consulta Flex.")
+
+
 def fetch_history(since: date, today: date | None = None) -> FetchResult:
     """Um pedido Flex por ano (fd/td), do presente para trás, até um ano vazio.
 
@@ -534,7 +551,7 @@ def fetch_history(since: date, today: date | None = None) -> FetchResult:
     mais_recente = True
     for start, end in _years_back(since, today):
         try:
-            part, active = _download(start, start, end)
+            part, active = _download_recuando(start, end) if mais_recente else _download(start, start, end)
         except NeedsUserAction as exc:
             if mais_recente or "1003" not in str(exc):
                 raise
