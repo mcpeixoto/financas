@@ -9,7 +9,7 @@ from decimal import Decimal
 import httpx
 
 from financas import config, secrets
-from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Position, Transaction
+from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Position, Trade, Transaction
 
 NAME = "ibkr"
 SECRETS = {"ibkr_flex_token": "Token do Flex Web Service do IBKR"}
@@ -166,6 +166,7 @@ def _parse(root, since: date) -> FetchResult:
     positions: list[Position] = []
     transactions: list[Transaction] = []
     cashflows: list[Cashflow] = []
+    trades: list[Trade] = []
     warnings: list[str] = []
     rates: dict = {}
     statements = [el for el in root.iter() if _local(el.tag) == "FlexStatement"]
@@ -176,11 +177,12 @@ def _parse(root, since: date) -> FetchResult:
         account = (stmt.attrib.get("accountId") or "IBKR").strip() or "IBKR"
         _positions(stmt, account, positions, warnings)
         _cash(stmt, account, balances)
-        _trades(stmt, account, since, transactions, warnings)
+        _trades(stmt, account, since, transactions, trades, warnings)
         _cash_txs(stmt, account, since, transactions, cashflows, warnings, rates)
 
     transactions.sort(key=lambda item: (item.booked, item.ext_id))
     cashflows.sort(key=lambda item: (item.booked, item.ext_id))
+    trades.sort(key=lambda item: (item.booked, item.ext_id))
     return FetchResult(
         source=NAME,
         balances=balances,
@@ -188,6 +190,7 @@ def _parse(root, since: date) -> FetchResult:
         transactions=transactions,
         warnings=warnings,
         cashflows=cashflows,
+        trades=trades,
     )
 
 
@@ -237,7 +240,47 @@ def _cash(stmt, account: str, balances: list[Balance]) -> None:
         )
 
 
-def _trades(stmt, account: str, since: date, transactions: list[Transaction], warnings: list[str]) -> None:
+def _asset_class(el) -> str:
+    category = (el.attrib.get("assetCategory") or "").strip().upper()
+    sub = (el.attrib.get("subCategory") or "").strip().upper()
+    if category == "STK":
+        return "etf" if sub == "ETF" else "acao"
+    if category == "CASH":
+        return "fx"
+    return "outro"
+
+
+def _trade_fx(el, currency: str) -> Decimal | None:
+    raw = el.attrib.get("fxRateToBase")
+    if raw not in (None, ""):
+        return Decimal(raw)
+    if currency.upper() == "EUR":
+        return Decimal(1)
+    return None
+
+
+def _realized_eur(el, side: str, fx: Decimal) -> Decimal | None:
+    """fifoPnlRealized está na moeda do negócio. Em euros só na venda, ou se o valor não for 0."""
+    raw = el.attrib.get("fifoPnlRealized")
+    if raw in (None, ""):
+        pnl = None
+    else:
+        pnl = Decimal(raw)
+    if side == "SELL" or (pnl is not None and pnl != 0):
+        if pnl is None:
+            return None
+        return pnl * fx
+    return None
+
+
+def _trades(
+    stmt,
+    account: str,
+    since: date,
+    transactions: list[Transaction],
+    trades: list[Trade],
+    warnings: list[str],
+) -> None:
     for el in _named(stmt, "Trade"):
         ext_id = (el.attrib.get("tradeID") or "").strip()
         raw_date = el.attrib.get("tradeDate")
@@ -255,8 +298,10 @@ def _trades(stmt, account: str, since: date, transactions: list[Transaction], wa
             continue
         side = (el.attrib.get("buySell") or "").strip().upper()
         symbol = (el.attrib.get("symbol") or "").strip()
-        quantity = _plain(Decimal(el.attrib.get("quantity") or "0"))
-        price = _plain(Decimal(el.attrib.get("tradePrice") or "0"))
+        qty = Decimal(el.attrib.get("quantity") or "0")
+        px = Decimal(el.attrib.get("tradePrice") or "0")
+        quantity = _plain(qty)
+        price = _plain(px)
         transactions.append(
             Transaction(
                 source=NAME,
@@ -265,6 +310,27 @@ def _trades(stmt, account: str, since: date, transactions: list[Transaction], wa
                 amount=Decimal(net),
                 currency=currency,
                 description=f"{side} {quantity} {symbol} @ {price}",
+                ext_id=ext_id,
+            )
+        )
+        fx = _trade_fx(el, currency)
+        if fx is None:
+            continue
+        name = (el.attrib.get("description") or symbol).strip() or symbol
+        trades.append(
+            Trade(
+                source=NAME,
+                booked=booked,
+                symbol=symbol,
+                name=name,
+                isin=(el.attrib.get("isin") or "").strip(),
+                asset_class=_asset_class(el),
+                quantity=qty,
+                price=px,
+                currency=currency,
+                net_cash=Decimal(net),
+                fx_to_eur=fx,
+                realized_pnl_eur=_realized_eur(el, side, fx),
                 ext_id=ext_id,
             )
         )
@@ -478,7 +544,9 @@ def fetch_history(since: date, today: date | None = None) -> FetchResult:
             break
         merged.transactions.extend(part.transactions)
         merged.cashflows.extend(part.cashflows)
+        merged.trades.extend(part.trades)
         merged.warnings.extend(part.warnings)
     merged.transactions.sort(key=lambda item: (item.booked, item.ext_id))
     merged.cashflows.sort(key=lambda item: (item.booked, item.ext_id))
+    merged.trades.sort(key=lambda item: (item.booked, item.ext_id))
     return merged

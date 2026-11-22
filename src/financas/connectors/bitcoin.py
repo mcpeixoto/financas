@@ -12,7 +12,7 @@ from embit.networks import NETWORKS
 from embit.script import p2wpkh
 
 from financas import secrets
-from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Transaction
+from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Trade, Transaction
 from financas.precos import eur_historico
 
 NAME = "bitcoin"
@@ -149,7 +149,7 @@ def fetch(since: date) -> FetchResult:
         if net != 0 and raw_time is not None:
             pending.append((txid, booked, net, int(raw_time)))
     transactions.sort(key=lambda item: (item.booked, item.ext_id))
-    cashflows = _cashflows(pending)
+    cashflows, trades = _cashflows(pending)
 
     return FetchResult(
         source=NAME,
@@ -164,6 +164,7 @@ def fetch(since: date) -> FetchResult:
         ],
         transactions=transactions,
         cashflows=cashflows,
+        trades=trades,
     )
 
 
@@ -182,10 +183,12 @@ def _preco_eur(client: httpx.Client, timestamp: int) -> Decimal | None:
     return eur_historico(payload, timestamp)
 
 
-def _cashflows(pending: list[tuple[str, date, Decimal, int]]) -> list[Cashflow]:
+def _cashflows(pending: list[tuple[str, date, Decimal, int]]) -> tuple[list[Cashflow], list[Trade]]:
+    """Recebido é compra e enviado é venda, ao preço histórico em EUR já usado no fluxo."""
     if not pending:
-        return []
+        return [], []
     found: list[Cashflow] = []
+    trades: list[Trade] = []
     cache: dict[int, Decimal | None] = {}
     with httpx.Client(timeout=30) as client:
         for txid, booked, net, timestamp in pending:
@@ -194,7 +197,8 @@ def _cashflows(pending: list[tuple[str, date, Decimal, int]]) -> list[Cashflow]:
             price = cache[timestamp]
             if price is None:
                 continue
-            amount = (net / _SATS) * price
+            btc = net / _SATS
+            amount = btc * price
             if net > 0:
                 kind, description = "deposito", "Recebido"
             else:
@@ -209,5 +213,23 @@ def _cashflows(pending: list[tuple[str, date, Decimal, int]]) -> list[Cashflow]:
                     ext_id=txid,
                 )
             )
+            trades.append(
+                Trade(
+                    source=NAME,
+                    booked=booked,
+                    symbol="BTC",
+                    name="Bitcoin",
+                    isin="",
+                    asset_class="cripto",
+                    quantity=btc,
+                    price=price,
+                    currency="EUR",
+                    net_cash=-amount,
+                    fx_to_eur=Decimal(1),
+                    realized_pnl_eur=None,
+                    ext_id=txid,
+                )
+            )
     found.sort(key=lambda item: (item.booked, item.ext_id))
-    return found
+    trades.sort(key=lambda item: (item.booked, item.ext_id))
+    return found, trades

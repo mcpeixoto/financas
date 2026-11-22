@@ -130,6 +130,7 @@ def _run_one(db, run_id: int, name: str, since: date, rates: Rates, log_path) ->
             result = module.fetch(since)
             store.save(db, run_id, result, rates.to_eur)
             store.save_cashflows(db, result.cashflows)
+            store.save_trades(db, result.trades)
             status = "ok"
             warnings = "\n".join(result.warnings)
             source = result.source or source
@@ -219,6 +220,7 @@ def _backfill_one(db, name: str, desde: date) -> str:
             result = module.fetch(desde)
         n_tx = store.save_transactions(db, result.transactions)
         n_cf = store.save_cashflows(db, result.cashflows)
+        store.save_trades(db, result.trades)
     except NeedsUserAction as exc:
         print(f"{display_name(source)}: precisa de ti: {exc}")
         return "precisa de ti"
