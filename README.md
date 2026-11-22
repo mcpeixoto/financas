@@ -65,6 +65,19 @@ Para o deixar sempre a correr no macOS, o launchd abre um applet. O TCC não dei
 2. Copiar `scripts/local.financas.dashboard.plist` para `~/Library/LaunchAgents/` e trocar `__HOME__` pelo teu `$HOME`.
 3. Carregar: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.financas.dashboard.plist`.
 
+## Página web
+
+A página em `http://127.0.0.1:8501` responde a três perguntas: quanto tenho e onde, se sou bom investidor, e para onde vai o dinheiro. Não usa o Streamlit, não precisa de build e funciona offline.
+
+```bash
+uv run financas web
+uv run financas web --porta 8502
+```
+
+Há seis separadores: Resumo, Investimentos, Posições, Gastos, Movimentos e Estado. «Esconder valores» vem ligado: só aparecem percentagens, pesos e índices com base 100. «Atualizar agora» corre `financas run --no-notify` em segundo plano. Corrigir a categoria de um movimento grava uma regra no início de `data/categorias.toml`.
+
+O dashboard Streamlit continua disponível com `uv run financas dashboard`.
+
 ## Dados privados
 
 Tudo o que é pessoal fica em `data/`, que está no `.gitignore`:

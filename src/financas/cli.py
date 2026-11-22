@@ -348,6 +348,14 @@ def cmd_relatorio(semanal: bool, semana: str | None, mes: str | None, com_valore
     return 0
 
 
+def cmd_web(porta: int) -> int:
+    """Abre a página local só em 127.0.0.1."""
+    from financas.web.server import serve
+
+    serve(porta)
+    return 0
+
+
 def cmd_dashboard(porta: int) -> int:
     """Abre o dashboard Streamlit só em 127.0.0.1."""
     app = Path(__file__).resolve().parent / "dashboard" / "app.py"
@@ -426,6 +434,9 @@ def main(argv: list[str] | None = None) -> int:
     dashboard = sub.add_parser("dashboard", help="abrir o dashboard local")
     dashboard.add_argument("--porta", type=int, default=8501)
 
+    web = sub.add_parser("web", help="abrir a página local")
+    web.add_argument("--porta", type=int, default=8501)
+
     relatorio = sub.add_parser("relatorio", help="gerar o relatório semanal ou mensal em HTML")
     modo = relatorio.add_mutually_exclusive_group(required=True)
     modo.add_argument("--semanal", action="store_true", help="semana ISO; omissão: a anterior")
@@ -453,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_categorias(args.sem_categoria, args.desde)
     if args.cmd == "dashboard":
         return cmd_dashboard(args.porta)
+    if args.cmd == "web":
+        return cmd_web(args.porta)
     return cmd_status()
 
 
