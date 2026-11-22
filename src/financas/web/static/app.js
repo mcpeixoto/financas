@@ -6,12 +6,14 @@ const CFG = { displayModeBar: false, responsive: true };
 const COR_CAPITAL = "#2a78d6";
 const COR_VALOR = "#eb6834";
 const COR_REALIZADO = "#1baf7a";
+const COR_INDICE = "#8a63d2";
 
 const memoria = new Map();
 const ordemTabelas = { posicoes: { chave: "peso", dir: -1 } };
 const graficos = [];
 const gastosEstado = { periodo: "este mês", inicio: "", fim: "", freq: "mes" };
-const movEstado = { texto: "", fonte: "", categoria: "", tipo: "", inicio: "", fim: "" };
+const PASSO_MOVIMENTOS = 500;
+const movEstado = { texto: "", fonte: "", categoria: "", tipo: "", inicio: "", fim: "", limite: PASSO_MOVIMENTOS };
 let geracao = 0;
 let plataformaEscolhida = "Total";
 let filtroPosicao = "";
@@ -233,46 +235,68 @@ function grafico(pai, traces, layout) {
 }
 
 function temNumeros(series) {
-  return (series || []).some((serie) => (serie.valores || []).some((valor) => Number(valor) !== 0));
+  return (series || []).some((serie) => (serie.valores || []).some((valor) => valor != null && Number(valor) !== 0));
 }
 
-function baseIndice(series) {
-  const n = (series || []).reduce((maximo, serie) => Math.max(maximo, (serie.valores || []).length), 0);
-  for (let i = 0; i < n; i += 1) {
-    let soma = 0;
-    series.forEach((serie) => {
-      soma += Number(serie.valores[i] || 0);
-    });
-    if (soma !== 0) return soma;
+/* Em modo escondido a API já devolve índices e pesos: aqui só se formata. */
+function rotuloValor(numero, unidade) {
+  if (numero == null || !Number.isFinite(Number(numero))) return "—";
+  if (unidade === "indice") return fmtIndice(numero);
+  if (unidade === "pct") return fmtNum(numero, 1) + "%";
+  if (esconderLigado()) return "—";
+  return fmtEur(numero);
+}
+
+function layoutUnidade(unidade) {
+  if (unidade === "indice") return layoutBase("Índice (base 100)", "");
+  if (unidade === "pct") return layoutBase("Percentagem", "");
+  return layoutBase("", " €");
+}
+
+function unidadeSegura(unidade) {
+  /* Nunca desenha euros com o interruptor ligado, mesmo que a resposta venha errada. */
+  if (esconderLigado() && unidade !== "indice" && unidade !== "pct") return null;
+  return unidade || "eur";
+}
+
+function eixoDatas(layout, datas) {
+  const lista = (datas || []).filter(Boolean);
+  layout.xaxis.type = "date";
+  layout.xaxis.tickformat = "%d/%m/%Y";
+  if (lista.length < 2) {
+    layout.xaxis.tickmode = "array";
+    layout.xaxis.tickvals = lista;
+    layout.xaxis.ticktext = lista.map(fmtData);
+    return;
   }
-  return null;
+  const dia = 86400000;
+  const intervalo = (Date.parse(lista[lista.length - 1]) - Date.parse(lista[0])) / dia;
+  layout.xaxis.tick0 = lista[0];
+  if (intervalo <= 14) {
+    layout.xaxis.dtick = dia;
+  } else if (intervalo <= 120) {
+    layout.xaxis.dtick = 7 * dia;
+  } else if (intervalo <= 800) {
+    layout.xaxis.dtick = "M1";
+    layout.xaxis.tickformat = "%m/%Y";
+  } else {
+    layout.xaxis.dtick = "M3";
+    layout.xaxis.tickformat = "%m/%Y";
+  }
 }
 
 function dica(quando, nome, rotulo) {
   return (quando ? fmtData(quando) + " · " : "") + nome + ": " + rotulo;
 }
 
-function desenharArea(pai, datas, series) {
-  if (!datas || !datas.length || !temNumeros(series)) {
+function desenharArea(pai, datas, series, unidade) {
+  const modo = unidadeSegura(unidade);
+  if (!modo || !datas || !datas.length || !temNumeros(series)) {
     pai.append(vazio());
     return;
   }
-  const esconder = esconderLigado();
-  const base = esconder ? baseIndice(series) : null;
   const traces = series.map((serie) => {
-    const y = [];
-    const texto = [];
-    (serie.valores || []).forEach((valor, indice) => {
-      const numero = Number(valor || 0);
-      if (esconder) {
-        const indice100 = base ? (numero / base) * 100 : 0;
-        y.push(indice100);
-        texto.push(dica(datas[indice], serie.nome, fmtIndice(indice100)));
-      } else {
-        y.push(numero);
-        texto.push(dica(datas[indice], serie.nome, fmtEur(numero)));
-      }
-    });
+    const y = (serie.valores || []).map((valor) => Number(valor || 0));
     return {
       type: "scatter",
       mode: "lines",
@@ -281,70 +305,57 @@ function desenharArea(pai, datas, series) {
       y: y,
       stackgroup: "um",
       line: { color: serie.cor, width: 1.5 },
-      customdata: texto,
+      customdata: y.map((numero, indice) => dica(datas[indice], serie.nome, rotuloValor(numero, modo))),
       hovertemplate: "%{customdata}<extra></extra>",
     };
   });
-  const layout = layoutBase(esconder ? "Índice (base 100)" : "", esconder ? "" : " €");
-  layout.xaxis.tickformat = "%d/%m/%Y";
+  const layout = layoutUnidade(modo);
+  eixoDatas(layout, datas);
   grafico(pai, traces, layout);
 }
 
-function desenharLinhas(pai, datas, series) {
-  if (!datas || !datas.length || !series.some((serie) => serie.valores.some((valor) => Number(valor) !== 0))) {
+function desenharLinhas(pai, datas, series, unidade) {
+  const modo = unidadeSegura(unidade);
+  if (!modo || !datas || !datas.length || !temNumeros(series)) {
     pai.append(vazio());
     return;
   }
-  const esconder = esconderLigado();
-  let base = null;
-  if (esconder) {
-    series.some((serie) => {
-      base = serie.valores.map(Number).find((valor) => valor !== 0) || null;
-      return base;
-    });
-  }
   const traces = series.map((serie) => {
-    const y = [];
-    const texto = [];
-    serie.valores.forEach((valor, indice) => {
-      const numero = Number(valor || 0);
-      if (esconder) {
-        const indice100 = base ? (numero / Math.abs(base)) * 100 : 0;
-        y.push(indice100);
-        texto.push(dica(datas[indice], serie.nome, fmtIndice(indice100)));
-      } else {
-        y.push(numero);
-        texto.push(dica(datas[indice], serie.nome, fmtEur(numero)));
-      }
-    });
+    const y = (serie.valores || []).map((valor) => (valor == null ? null : Number(valor)));
     return {
       type: "scatter",
-      mode: "lines+markers",
+      mode: datas.length > 24 ? "lines" : "lines+markers",
       name: serie.nome,
       x: datas,
       y: y,
-      line: { color: serie.cor, width: 2 },
-      customdata: texto,
+      connectgaps: false,
+      line: { color: serie.cor, width: 2, dash: serie.tracejado ? "dot" : "solid" },
+      customdata: y.map((numero, indice) => dica(datas[indice], serie.nome, rotuloValor(numero, modo))),
       hovertemplate: "%{customdata}<extra></extra>",
     };
   });
-  const layout = layoutBase(esconder ? "Índice (base 100)" : "", esconder ? "" : " €");
-  layout.xaxis.tickformat = "%d/%m/%Y";
+  const layout = layoutUnidade(modo);
+  eixoDatas(layout, datas);
   grafico(pai, traces, layout);
 }
 
 function desenharDonut(pai, partes) {
-  const uteis = (partes || []).filter((parte) => Number(parte.valor) !== 0);
+  const esconder = esconderLigado();
+  const uteis = (partes || [])
+    .map((parte) => ({
+      nome: parte.nome,
+      cor: parte.cor,
+      peso: parte.peso == null ? null : Number(parte.peso),
+      valor: esconder || parte.valor == null ? null : Number(parte.valor),
+    }))
+    .filter((parte) => (esconder ? parte.peso : parte.valor != null ? parte.valor : parte.peso));
   if (!uteis.length) {
     pai.append(vazio());
     return;
   }
-  const total = uteis.reduce((soma, parte) => soma + Number(parte.valor), 0);
-  const esconder = esconderLigado();
   const texto = uteis.map((parte) => {
-    const peso = total ? Number(parte.valor) / total : null;
-    if (esconder) return parte.nome + ": " + fmtPct(peso);
-    return parte.nome + ": " + fmtEur(parte.valor) + " (" + fmtPct(peso) + ")";
+    if (parte.valor == null) return parte.nome + ": " + fmtPct(parte.peso);
+    return parte.nome + ": " + fmtEur(parte.valor) + " (" + fmtPct(parte.peso) + ")";
   });
   const cor = corTexto();
   grafico(
@@ -352,7 +363,7 @@ function desenharDonut(pai, partes) {
     [{
       type: "pie",
       labels: uteis.map((parte) => parte.nome),
-      values: uteis.map((parte) => (esconder && total ? (Number(parte.valor) / total) * 100 : Number(parte.valor))),
+      values: uteis.map((parte) => (parte.valor == null ? Number(parte.peso || 0) * 100 : parte.valor)),
       hole: 0.55,
       sort: false,
       marker: { colors: uteis.map((parte) => parte.cor) },
@@ -374,91 +385,58 @@ function desenharDonut(pai, partes) {
   );
 }
 
-function desenharBarras(pai, chaves, series, modo) {
-  if (!chaves || !chaves.length || !temNumeros(series)) {
+function desenharBarras(pai, chaves, series, unidade, barmode) {
+  const modo = unidadeSegura(unidade);
+  if (!modo || !chaves || !chaves.length || !temNumeros(series)) {
     pai.append(vazio());
     return;
   }
-  const esconder = esconderLigado();
   const rotulos = chaves.map(fmtPeriodo);
-  const totais = chaves.map((_, indice) => series.reduce((soma, serie) => soma + Number(serie.valores[indice] || 0), 0));
   const traces = series.map((serie) => {
-    const y = [];
-    const texto = [];
-    (serie.valores || []).forEach((valor, indice) => {
-      const numero = Number(valor || 0);
-      if (esconder && modo !== "indice") {
-        const peso = totais[indice] ? numero / totais[indice] : 0;
-        y.push(peso * 100);
-        texto.push(serie.nome + " · " + rotulos[indice] + ": " + fmtPct(peso));
-      } else if (esconder) {
-        y.push(numero);
-        texto.push(serie.nome + " · " + rotulos[indice] + ": " + fmtIndice(numero));
-      } else {
-        y.push(numero);
-        texto.push(serie.nome + " · " + rotulos[indice] + ": " + fmtEur(numero));
-      }
-    });
+    const y = (serie.valores || []).map((valor) => (valor == null ? null : Number(valor)));
     return {
       type: "bar",
       name: serie.nome,
       x: rotulos,
       y: y,
-      marker: { color: serie.cor },
-      customdata: texto,
+      marker: { color: serie.cores || serie.cor },
+      customdata: y.map((numero, indice) => serie.nome + " · " + rotulos[indice] + ": " + rotuloValor(numero, modo)),
       hovertemplate: "%{customdata}<extra></extra>",
     };
   });
-  const layout = layoutBase(
-    esconder ? (modo === "indice" ? "Índice (base 100)" : "Percentagem") : "",
-    esconder ? "" : " €",
-  );
-  layout.barmode = modo === "grupo" || modo === "indice" ? "group" : "stack";
+  const layout = layoutUnidade(modo);
+  layout.barmode = barmode || "group";
   layout.xaxis.type = "category";
   grafico(pai, traces, layout);
 }
 
-function desenharColunas(pai, rotulos, valores, nome, cor) {
-  if (!valores || !valores.some((valor) => Number(valor) !== 0)) {
+function desenharBarrasH(pai, rotulos, valores, cores, unidade) {
+  const modo = unidadeSegura(unidade);
+  if (!modo || !valores || !valores.some((valor) => valor != null && Number(valor) !== 0)) {
     pai.append(vazio());
     return;
   }
-  const esconder = esconderLigado();
-  const total = valores.reduce((soma, valor) => soma + Number(valor || 0), 0);
-  const y = [];
-  const texto = [];
-  valores.forEach((valor, indice) => {
-    const numero = Number(valor || 0);
-    if (esconder) {
-      const peso = total ? numero / total : 0;
-      y.push(peso * 100);
-      texto.push(nome + " · " + rotulos[indice] + ": " + fmtPct(peso));
-    } else {
-      y.push(numero);
-      texto.push(nome + " · " + rotulos[indice] + ": " + fmtEur(numero));
-    }
-  });
-  const layout = layoutBase(esconder ? "Percentagem" : "", esconder ? "" : " €");
-  layout.xaxis.type = "category";
+  const x = valores.map((valor) => (valor == null ? 0 : Number(valor)));
+  const layout = layoutUnidade(modo);
+  layout.xaxis = Object.assign(layout.xaxis, { ticksuffix: layout.yaxis.ticksuffix, title: layout.yaxis.title });
+  layout.yaxis = { automargin: true, tickfont: { color: corTexto() }, type: "category" };
+  layout.margin = { l: 12, r: 12, t: 16, b: 48 };
+  layout.height = Math.max(240, 28 * rotulos.length + 80);
+  layout.hovermode = "closest";
+  layout.showlegend = false;
   grafico(pai, [{
     type: "bar",
-    name: nome,
-    x: rotulos,
-    y: y,
-    marker: { color: cor || COR_CAPITAL },
-    customdata: texto,
+    orientation: "h",
+    x: x,
+    y: rotulos,
+    marker: { color: cores },
+    customdata: x.map((numero, indice) => rotulos[indice] + ": " + rotuloValor(numero, modo)),
     hovertemplate: "%{customdata}<extra></extra>",
   }], layout);
 }
 
-function indiceConjunto(listas) {
-  let base = null;
-  listas.forEach((valores) => {
-    if (base != null) return;
-    const achado = valores.map(Number).find((valor) => valor !== 0);
-    if (achado) base = Math.abs(achado);
-  });
-  return base;
+function desenharColunas(pai, rotulos, valores, nome, cor, unidade) {
+  desenharBarras(pai, rotulos, [{ nome: nome, cor: cor || COR_CAPITAL, valores: valores }], unidade, "group");
 }
 
 function queryDe(nome) {
@@ -478,10 +456,16 @@ function queryDe(nome) {
       texto: movEstado.texto,
       inicio: movEstado.inicio,
       fim: movEstado.fim,
-      limite: "500",
+      limite: String(movEstado.limite),
     };
   }
   return {};
+}
+
+function queryComEsconder(nome) {
+  const params = queryDe(nome);
+  params.esconder = esconderLigado() ? "1" : "0";
+  return params;
 }
 
 function urlDe(nome, params) {
@@ -495,7 +479,7 @@ function urlDe(nome, params) {
 }
 
 async function obter(nome) {
-  const url = urlDe(nome, queryDe(nome));
+  const url = urlDe(nome, queryComEsconder(nome));
   if (memoria.has(url)) return memoria.get(url);
   const resposta = await fetch(url);
   let dados = {};
@@ -548,23 +532,23 @@ function vistaResumo(dados) {
   const raiz = h("div");
   raiz.append(h("h1", { text: "Quanto tenho e onde?" }));
   if (dados.dia) raiz.append(h("p", { class: "nota", text: "Snapshot de " + fmtData(dados.dia) + "." }));
-  const indice = indicePatrimonio(dados.serie);
   const variacao = dados.variacao || {};
+  const esconder = esconderLigado();
   raiz.append(cartoes([
     cartao(
       "Património",
-      esconderLigado() ? (indice == null ? "—" : fmtIndice(indice)) : fmtEur(dados.patrimonio),
-      esconderLigado() ? "Índice (base 100)" : null,
+      esconder ? fmtIndice(dados.patrimonio_indice) : montante(dados.patrimonio),
+      esconder ? "Índice (base 100)" : null,
     ),
     cartao(
       "Desde o snapshot anterior",
-      esconderLigado() ? fmtPct(variacao.delta_anterior_pct) : montante(variacao.delta_anterior),
-      esconderLigado() ? null : fmtPct(variacao.delta_anterior_pct),
+      esconder ? fmtPct(variacao.delta_anterior_pct) : montante(variacao.delta_anterior),
+      esconder ? null : fmtPct(variacao.delta_anterior_pct),
     ),
     cartao(
       "Há 30 dias",
-      esconderLigado() ? fmtPct(variacao.delta_30_pct) : montante(variacao.delta_30),
-      esconderLigado() ? null : fmtPct(variacao.delta_30_pct),
+      esconder ? fmtPct(variacao.delta_30_pct) : montante(variacao.delta_30),
+      esconder ? null : fmtPct(variacao.delta_30_pct),
     ),
     cartao("Fontes ok", String(dados.n_fontes_ok == null ? 0 : dados.n_fontes_ok)),
   ]));
@@ -573,9 +557,10 @@ function vistaResumo(dados) {
   }
   raiz.append(blocoVeredicto(dados.veredicto));
   const area = h("div");
-  desenharArea(area, (dados.serie && dados.serie.datas) || [], (dados.serie && dados.serie.series) || []);
+  const serie = dados.serie || {};
+  desenharArea(area, serie.datas || [], serie.series || [], serie.unidade);
   raiz.append(seccao("Património por fonte", area));
-  if (dados.fontes && dados.fontes.length) raiz.append(listaPesos(dados.fontes, dados.patrimonio));
+  if (dados.fontes && dados.fontes.length) raiz.append(listaPesos(dados.fontes));
   const donut = h("div");
   desenharDonut(donut, dados.alocacao || []);
   raiz.append(seccao("Alocação", donut));
@@ -583,22 +568,21 @@ function vistaResumo(dados) {
   return raiz;
 }
 
-function indicePatrimonio(serie) {
-  if (!serie || !serie.series || !serie.series.length) return null;
-  const base = baseIndice(serie.series);
-  if (!base) return null;
-  const ultimo = serie.series.reduce((soma, item) => soma + Number((item.valores || [])[item.valores.length - 1] || 0), 0);
-  return (ultimo / base) * 100;
-}
-
-function listaPesos(fontes, total) {
+function listaPesos(fontes) {
   const lista = h("ul", { class: "lista" });
   fontes.forEach((fonte) => {
-    const peso = total ? Number(fonte.valor) / Number(total) : null;
-    const texto = esconderLigado()
-      ? fonte.nome + " · " + fmtPct(peso)
-      : fonte.nome + " · " + fmtEur(fonte.valor) + " (" + fmtPct(peso) + ")";
-    lista.append(h("li", {}, amostra(fonte.cor), h("span", { text: texto })));
+    const texto = esconderLigado() || fonte.valor == null
+      ? fonte.nome + " · " + fmtPct(fonte.peso)
+      : fonte.nome + " · " + fmtEur(fonte.valor) + " (" + fmtPct(fonte.peso) + ")";
+    const item = h("li", {}, amostra(fonte.cor), h("span", { text: texto }));
+    if (fonte.desatualizada_desde) {
+      item.append(" ", h("span", {
+        class: "desatualizada",
+        title: "Esta fonte falhou na última corrida.",
+        text: "(valor de " + fmtData(fonte.desatualizada_desde).slice(0, 5) + ")",
+      }));
+    }
+    lista.append(item);
   });
   return lista;
 }
@@ -653,13 +637,34 @@ function vistaInvestimentos(dados) {
   const comparacao = h("p");
   comparacao.append(etiqueta(escolha.etiqueta), " ", h("span", { text: escolha.veredicto || "" }));
   raiz.append(comparacao);
+  const mensal = escolha.mensal || {};
+  const datas = mensal.datas || [];
   const curvas = h("div");
-  const pontos = escolha.curva || [];
-  desenharLinhas(curvas, pontos.map((ponto) => ponto.dia), [
-    { nome: "Capital investido", cor: COR_CAPITAL, valores: pontos.map((ponto) => ponto.capital) },
-    { nome: "Valor", cor: COR_VALOR, valores: pontos.map((ponto) => ponto.valor) },
-  ]);
-  raiz.append(seccao("Capital investido e valor", curvas));
+  desenharLinhas(curvas, datas, [
+    { nome: "Depositado", cor: COR_CAPITAL, valores: mensal.depositado || [] },
+    { nome: "Valor", cor: COR_VALOR, valores: mensal.valor || [] },
+    { nome: "Se fosse MSCI World", cor: COR_INDICE, tracejado: true, valores: mensal.indice || [] },
+  ], mensal.unidade);
+  const blocoCurvas = seccao("Capital investido e valor", curvas);
+  if (mensal.unidade === "indice") {
+    blocoCurvas.append(h("p", { class: "nota", text: "Índice: 100 = total depositado no fim do período." }));
+  }
+  if (escolha.fonte == null && dados.sem_depositos && dados.sem_depositos.length) {
+    blocoCurvas.append(h("p", {
+      class: "nota",
+      text: "Sem depósitos registados, fora do total: " + dados.sem_depositos.join(", ") + ".",
+    }));
+  }
+  raiz.append(blocoCurvas);
+  const barras = h("div");
+  const ganho = mensal.ganho || [];
+  desenharBarras(barras, datas.map((dia) => String(dia).slice(0, 7)), [{
+    nome: "Ganho acumulado",
+    cor: COR_REALIZADO,
+    cores: ganho.map((valor) => (Number(valor) < 0 ? COR_VALOR : COR_REALIZADO)),
+    valores: ganho,
+  }], mensal.unidade, "group");
+  raiz.append(seccao("Ganho acumulado (valor − depositado)", barras));
   raiz.append(seccao("Rendimentos e lucro realizado", graficoAnos(escolha)));
   return raiz;
 }
@@ -667,15 +672,16 @@ function vistaInvestimentos(dados) {
 function tabelaInvestimentos(linhas) {
   const cabeca = h("tr");
   const colunas = ["Plataforma", "Ganho", "XIRR", "MSCI World", "Tu vs índice"];
-  if (!esconderLigado()) colunas.splice(1, 0, "Depositado", "Valor");
+  const comValores = !esconderLigado() && linhas.some((linha) => linha.depositado != null);
+  if (comValores) colunas.splice(1, 0, "Depositado", "Valor");
   colunas.forEach((titulo) => cabeca.append(h("th", { text: titulo })));
   const corpo = h("tbody");
   linhas.forEach((linha) => {
     const tr = h("tr");
     tr.append(h("td", { text: linha.nome }));
-    if (!esconderLigado()) {
-      tr.append(h("td", { class: "num", text: fmtEur(linha.depositado) }));
-      tr.append(h("td", { class: "num", text: fmtEur(linha.valor) }));
+    if (comValores) {
+      tr.append(h("td", { class: "num", text: montante(linha.depositado) }));
+      tr.append(h("td", { class: "num", text: montante(linha.valor) }));
     }
     tr.append(h("td", { class: "num", text: fmtPct(linha.ganho_pct) }));
     tr.append(h("td", { class: "num", text: fmtPct(linha.xirr) }));
@@ -690,11 +696,13 @@ function tabelaInvestimentos(linhas) {
 
 function graficoAnos(linha) {
   const caixa = h("div");
+  const indice = esconderLigado();
+  const chave = indice ? "indice" : "valor";
   const mapa = new Map();
-  (linha.rendimentos || []).forEach((item) => mapa.set(item.ano, { ano: item.ano, rendimento: item.valor, realizado: 0 }));
+  (linha.rendimentos || []).forEach((item) => mapa.set(item.ano, { ano: item.ano, rendimento: item[chave], realizado: 0 }));
   (linha.realizado || []).forEach((item) => {
     const atual = mapa.get(item.ano) || { ano: item.ano, rendimento: 0, realizado: 0 };
-    atual.realizado = item.valor;
+    atual.realizado = item[chave];
     mapa.set(item.ano, atual);
   });
   const anos = Array.from(mapa.values()).sort((a, b) => a.ano - b.ano);
@@ -702,23 +710,10 @@ function graficoAnos(linha) {
     caixa.append(vazio());
     return caixa;
   }
-  const esconder = esconderLigado();
-  const rendimentos = anos.map((item) => item.rendimento);
-  const realizado = anos.map((item) => item.realizado);
-  let series;
-  if (esconder) {
-    const base = indiceConjunto([rendimentos, realizado]);
-    series = [
-      { nome: "Dividendos e juros", cor: COR_CAPITAL, valores: rendimentos.map((valor) => (base ? (Number(valor) / base) * 100 : 0)) },
-      { nome: "Lucro realizado", cor: COR_REALIZADO, valores: realizado.map((valor) => (base ? (Number(valor) / base) * 100 : 0)) },
-    ];
-  } else {
-    series = [
-      { nome: "Dividendos e juros", cor: COR_CAPITAL, valores: rendimentos },
-      { nome: "Lucro realizado", cor: COR_REALIZADO, valores: realizado },
-    ];
-  }
-  desenharBarras(caixa, anos.map((item) => String(item.ano)), series, esconder ? "indice" : "grupo");
+  desenharBarras(caixa, anos.map((item) => String(item.ano)), [
+    { nome: "Dividendos e juros", cor: COR_CAPITAL, valores: anos.map((item) => item.rendimento) },
+    { nome: "Lucro realizado", cor: COR_REALIZADO, valores: anos.map((item) => item.realizado) },
+  ], indice ? "indice" : "eur", "group");
   return caixa;
 }
 
@@ -744,20 +739,53 @@ function vistaPosicoes(dados) {
     },
   )));
   raiz.append(controlos);
+  const resumo = dados.cartoes;
+  if (resumo) {
+    raiz.append(cartoes([
+      cartao("Posições abertas", String(resumo.abertas == null ? 0 : resumo.abertas)),
+      cartao("Peso das 3 maiores", fmtPct(resumo.peso_top3)),
+      cartao("Ganho latente total", fmtPct(resumo.latente_pct), "sobre o custo"),
+    ]));
+  }
   const visiveis = (dados.atuais || []).filter((linha) => !filtro || linha.fonte === filtro);
   raiz.append(tabelaPosicoes(visiveis));
+  raiz.append(seccao("Ganho por posição", graficoGanhos(dados.ganho_por_posicao || [], filtro)));
   const custo = h("div");
-  desenharArea(custo, (dados.historico_custo || {}).datas || [], (dados.historico_custo || {}).series || []);
+  const historicoCusto = dados.historico_custo || {};
+  desenharArea(custo, historicoCusto.datas || [], historicoCusto.series || [], historicoCusto.unidade);
   raiz.append(seccao("Capital investido por posição", custo));
   const valor = h("div");
-  desenharArea(valor, (dados.historico_valor || {}).datas || [], (dados.historico_valor || {}).series || []);
+  const historicoValor = dados.historico_valor || {};
+  desenharArea(valor, historicoValor.datas || [], historicoValor.series || [], historicoValor.unidade);
   const blocoValor = seccao("Valor de mercado por posição", valor);
-  const semPreco = (dados.historico_valor && dados.historico_valor.sem_preco) || [];
+  const semPreco = historicoValor.sem_preco || [];
   if (semPreco.length) blocoValor.append(h("p", { class: "nota", text: "Sem preço: " + semPreco.join(", ") }));
   raiz.append(blocoValor);
   raiz.append(seccao("Negócios fechados", cartoesNegocios(dados.estatisticas)));
   raiz.append(seccao("Realizado por símbolo", tabelaRealizado(dados.realizado_por_simbolo || [])));
   return raiz;
+}
+
+function graficoGanhos(linhas, filtro) {
+  const caixa = h("div");
+  const esconder = esconderLigado();
+  const chave = esconder ? "ganho_pct" : "ganho_eur";
+  const uteis = linhas.filter((linha) => (!filtro || linha.fonte === filtro) && linha[chave] != null);
+  const valores = uteis.map((linha) => (esconder ? Number(linha[chave]) * 100 : Number(linha[chave])));
+  desenharBarrasH(
+    caixa,
+    uteis.map((linha) => linha.rotulo),
+    valores,
+    valores.map((valor) => (valor < 0 ? COR_VALOR : COR_REALIZADO)),
+    esconder ? "pct" : "eur",
+  );
+  caixa.append(h("p", {
+    class: "nota",
+    text: esconder
+      ? "Ganho latente + realizado + dividendos, em % do custo."
+      : "Ganho latente + realizado + dividendos.",
+  }));
+  return caixa;
 }
 
 function barraLatente(pct, maximo) {
@@ -782,13 +810,25 @@ function tabelaPosicoes(linhas) {
   if (!linhas.length) return vazio();
   const maximo = linhas.reduce((maior, linha) => Math.max(maior, Math.abs(Number(linha.latente_pct) || 0)), 0);
   const estado = ordemTabelas.posicoes;
+  const esconder = esconderLigado();
   const colunas = [
-    { chave: "nome", titulo: "Posição", ordem: (linha) => linha.nome || linha.simbolo },
-    { chave: "classe", titulo: "Classe" },
+    { chave: "nome", titulo: "Posição", ordem: (linha) => linha.rotulo || linha.nome || linha.simbolo },
+    { chave: "fonte", titulo: "Fonte", ordem: (linha) => linha.nome_fonte || linha.fonte || "" },
+    { chave: "classe", titulo: "Classe", ordem: (linha) => linha.classe_nome || linha.classe || "" },
     { chave: "peso", titulo: "Peso", num: true, ordem: (linha) => Number(linha.peso) },
     { chave: "latente_pct", titulo: "Ganho latente", num: true, ordem: (linha) => Number(linha.latente_pct) },
-    { chave: "realizado_eur", titulo: esconderLigado() ? "Realizado %" : "Realizado", num: true, ordem: (linha) => Number(linha.realizado_eur) },
-    { chave: "dividendos_eur", titulo: esconderLigado() ? "Dividendos %" : "Dividendos", num: true, ordem: (linha) => Number(linha.dividendos_eur) },
+    {
+      chave: "realizado_eur",
+      titulo: esconder ? "Realizado %" : "Realizado",
+      num: true,
+      ordem: (linha) => Number(esconder ? linha.realizado_pct : linha.realizado_eur),
+    },
+    {
+      chave: "dividendos_eur",
+      titulo: esconder ? "Dividendos %" : "Dividendos",
+      num: true,
+      ordem: (linha) => Number(esconder ? linha.dividendos_pct : linha.dividendos_eur),
+    },
   ];
   const ordenadas = linhas.slice().sort((a, b) => comparar(a, b, colunas, estado));
   const cabeca = h("tr");
@@ -811,25 +851,21 @@ function tabelaPosicoes(linhas) {
   });
   const corpo = h("tbody");
   ordenadas.forEach((linha) => {
-    const nome = (linha.nome || linha.simbolo || "") + (linha.simbolo ? " (" + linha.simbolo + ")" : "");
+    const base = linha.rotulo || linha.nome || linha.simbolo || "";
+    const nome = base + (linha.simbolo && linha.simbolo !== base ? " · " + linha.simbolo : "");
     const tr = h("tr");
     tr.append(h("td", { text: nome }));
-    tr.append(h("td", { text: linha.classe || "—" }));
+    tr.append(h("td", { text: linha.nome_fonte || linha.fonte || "—" }));
+    tr.append(h("td", { text: linha.classe_nome || linha.classe || "—" }));
     tr.append(h("td", { class: "num", text: fmtPct(linha.peso) }));
     const ganho = h("td", { class: "num" });
     ganho.append(barraLatente(linha.latente_pct, maximo));
     tr.append(ganho);
-    tr.append(h("td", { class: "num", text: percentagemSobreValor(linha.realizado_eur, linha.valor_eur, linha.realizado_eur) }));
-    tr.append(h("td", { class: "num", text: percentagemSobreValor(linha.dividendos_eur, linha.valor_eur, linha.dividendos_eur) }));
+    tr.append(h("td", { class: "num", text: esconder ? fmtPct(linha.realizado_pct) : montante(linha.realizado_eur) }));
+    tr.append(h("td", { class: "num", text: esconder ? fmtPct(linha.dividendos_pct) : montante(linha.dividendos_eur) }));
     corpo.append(tr);
   });
   return h("div", { class: "tabela-wrap" }, h("table", {}, h("thead", {}, cabeca), corpo));
-}
-
-function percentagemSobreValor(parte, total, euros) {
-  if (!esconderLigado()) return fmtEur(euros);
-  if (!total) return "—";
-  return fmtPct(Number(parte) / Number(total));
 }
 
 function comparar(a, b, colunas, estado) {
@@ -857,32 +893,36 @@ function cartoesNegocios(estatisticas) {
     cartao("Taxa de acerto", fmtPct(estatisticas.taxa_acerto)),
     cartao("Fator de lucro", estatisticas.fator_lucro == null ? "—" : fmtNum(estatisticas.fator_lucro, 2)),
   ];
+  const melhor = estatisticas.melhor;
+  const pior = estatisticas.pior;
   if (!esconderLigado()) {
-    lista.push(cartao("Melhor", estatisticas.melhor ? fmtEur(estatisticas.melhor.valor) : "—", estatisticas.melhor ? estatisticas.melhor.nome : null));
-    lista.push(cartao("Pior", estatisticas.pior ? fmtEur(estatisticas.pior.valor) : "—", estatisticas.pior ? estatisticas.pior.nome : null));
+    lista.push(cartao("Melhor", melhor ? montante(melhor.valor) : "—", melhor ? melhor.nome : null));
+    lista.push(cartao("Pior", pior ? montante(pior.valor) : "—", pior ? pior.nome : null));
   } else {
-    lista.push(cartao("Melhor", estatisticas.melhor ? estatisticas.melhor.nome : "—"));
-    lista.push(cartao("Pior", estatisticas.pior ? estatisticas.pior.nome : "—"));
+    lista.push(cartao("Melhor", melhor ? melhor.nome : "—"));
+    lista.push(cartao("Pior", pior ? pior.nome : "—"));
   }
   return cartoes(lista);
 }
 
 function tabelaRealizado(linhas) {
   if (!linhas.length) return vazio();
+  const esconder = esconderLigado();
   const cabeca = h("tr");
-  ["Símbolo", "Fonte", "Vendas", "Ganhos", "Acerto", esconderLigado() ? "" : "Realizado", "Estado"].filter(Boolean).forEach((titulo) => {
+  ["Símbolo", "Fonte", "Vendas", "Ganhos", "Acerto", esconder ? "" : "Realizado", "Estado"].filter(Boolean).forEach((titulo) => {
     cabeca.append(h("th", { text: titulo }));
   });
   const corpo = h("tbody");
   linhas.forEach((linha) => {
     const acerto = linha.vendas ? linha.ganhos / linha.vendas : null;
     const tr = h("tr");
-    tr.append(h("td", { text: linha.nome ? linha.nome + " (" + linha.simbolo + ")" : linha.simbolo }));
+    const nome = linha.rotulo || linha.nome;
+    tr.append(h("td", { text: nome ? nome + " (" + linha.simbolo + ")" : linha.simbolo }));
     tr.append(h("td", { text: linha.nome_fonte || linha.fonte || "" }));
     tr.append(h("td", { class: "num", text: String(linha.vendas) }));
     tr.append(h("td", { class: "num", text: String(linha.ganhos) }));
     tr.append(h("td", { class: "num", text: fmtPct(acerto) }));
-    if (!esconderLigado()) tr.append(h("td", { class: "num", text: fmtEur(linha.realizado_eur) }));
+    if (!esconder) tr.append(h("td", { class: "num", text: montante(linha.realizado_eur) }));
     tr.append(h("td", { text: linha.ainda_aberta ? "Ainda aberta" : "Fechada" }));
     corpo.append(tr);
   });
@@ -904,21 +944,36 @@ function vistaGastos(dados) {
   const donut = h("div");
   desenharDonut(donut, dados.categorias || []);
   raiz.append(seccao("Por categoria", donut));
+  const esconder = esconderLigado();
   const barras = h("div");
-  desenharBarras(barras, dados.periodos || [], dados.empilhado || [], "percentagem");
+  const empilhado = (dados.empilhado || []).map((serie) => ({
+    nome: serie.nome,
+    cor: serie.cor,
+    valores: esconder || serie.valores == null
+      ? (serie.pesos || []).map((peso) => Number(peso || 0) * 100)
+      : serie.valores,
+  }));
+  desenharBarras(barras, dados.periodos || [], empilhado, esconder ? "pct" : "eur", "stack");
   raiz.append(seccao("Por período", barras));
   const fluxo = h("div");
   const meses = dados.receitas_gastos || [];
   desenharBarras(fluxo, meses.map((item) => item.periodo), [
-    { nome: "Receitas", cor: COR_REALIZADO, valores: meses.map((item) => item.receitas) },
-    { nome: "Gastos", cor: COR_VALOR, valores: meses.map((item) => item.gastos) },
-  ], "grupo");
+    { nome: "Receitas", cor: COR_REALIZADO, valores: meses.map((item) => (esconder ? item.indice_receitas : item.receitas)) },
+    { nome: "Gastos", cor: COR_VALOR, valores: meses.map((item) => (esconder ? item.indice_gastos : item.gastos)) },
+  ], esconder ? "indice" : "eur", "group");
   raiz.append(seccao("Receitas e gastos", fluxo));
   raiz.append(seccao("Top comerciantes", tabelaPares(dados.comerciantes || [], dados.categorias || [], "Comerciante", "valor")));
   raiz.append(seccao("Subscrições", tabelaSubscricoes(dados.subscricoes || [])));
   const dias = h("div");
   const listaDias = dados.dias || [];
-  desenharColunas(dias, listaDias.map((item) => item.nome), listaDias.map((item) => item.valor), "Gastos", COR_CAPITAL);
+  desenharColunas(
+    dias,
+    listaDias.map((item) => item.nome),
+    listaDias.map((item) => (esconder ? Number(item.peso || 0) * 100 : item.valor)),
+    "Gastos",
+    COR_CAPITAL,
+    esconder ? "pct" : "eur",
+  );
   raiz.append(seccao("Dia da semana", dias));
   raiz.append(seccao("Comparação com o mês anterior", tabelaComparacao(dados.comparacao || [])));
   return raiz;
@@ -987,10 +1042,10 @@ function tabelaPares(linhas, categorias, titulo, chave) {
   const cabeca = h("tr", {}, h("th", { text: titulo }), h("th", { class: "num", text: esconderLigado() ? "Peso" : "Valor" }));
   const corpo = h("tbody");
   linhas.forEach((linha) => {
-    const peso = total ? Number(linha[chave]) / total : null;
+    const peso = linha.peso != null ? linha.peso : total ? Number(linha[chave]) / total : null;
     corpo.append(h("tr", {}, h("td", { class: "largo", text: linha.nome }), h("td", {
       class: "num",
-      text: esconderLigado() ? fmtPct(peso) : fmtEur(linha[chave]),
+      text: esconderLigado() ? fmtPct(peso) : montante(linha[chave]),
     })));
   });
   return h("div", { class: "tabela-wrap" }, h("table", {}, h("thead", {}, cabeca), corpo));
@@ -1002,11 +1057,11 @@ function tabelaSubscricoes(linhas) {
   const cabeca = h("tr", {}, h("th", { text: "Nome" }), h("th", { text: "Periodicidade" }), h("th", { class: "num", text: esconderLigado() ? "Peso" : "Custo anual" }));
   const corpo = h("tbody");
   linhas.forEach((linha) => {
-    const peso = total ? Number(linha.custo_anual) / total : null;
+    const peso = linha.peso != null ? linha.peso : total ? Number(linha.custo_anual) / total : null;
     corpo.append(h("tr", {},
       h("td", { class: "largo", text: linha.nome }),
       h("td", { text: linha.periodicidade || "" }),
-      h("td", { class: "num", text: esconderLigado() ? fmtPct(peso) : fmtEur(linha.custo_anual) }),
+      h("td", { class: "num", text: esconderLigado() ? fmtPct(peso) : montante(linha.custo_anual) }),
     ));
   });
   return h("div", { class: "tabela-wrap" }, h("table", {}, h("thead", {}, cabeca), corpo));
@@ -1024,9 +1079,9 @@ function tabelaComparacao(linhas) {
     const tr = h("tr");
     tr.append(h("td", {}, amostra(linha.cor), " ", h("span", { text: linha.categoria })));
     if (!esconderLigado()) {
-      tr.append(h("td", { class: "num", text: fmtEur(linha.este_mes) }));
-      tr.append(h("td", { class: "num", text: fmtEur(linha.mes_anterior) }));
-      tr.append(h("td", { class: "num", text: fmtEur(linha.media_3_meses) }));
+      tr.append(h("td", { class: "num", text: montante(linha.este_mes) }));
+      tr.append(h("td", { class: "num", text: montante(linha.mes_anterior) }));
+      tr.append(h("td", { class: "num", text: montante(linha.media_3_meses) }));
     }
     tr.append(h("td", { class: "num", text: fmtPct(linha.vs_anterior) }));
     tr.append(h("td", { class: "num", text: fmtPct(linha.vs_media) }));
@@ -1054,6 +1109,7 @@ function filtrosMovimentos(dados) {
     placeholder: "Pesquisar",
     oninput: (evento) => {
       movEstado.texto = evento.target.value;
+      movEstado.limite = PASSO_MOVIMENTOS;
       clearTimeout(timerPesquisa);
       timerPesquisa = setTimeout(atualizarTabelaMovimentos, 180);
     },
@@ -1061,9 +1117,10 @@ function filtrosMovimentos(dados) {
   linha.append(h("label", { class: "campo", text: "Pesquisa" }, pesquisa));
   linha.append(h("label", { class: "campo", text: "Fonte" }, selecionar(
     movEstado.fonte,
-    [["", "Todas"]].concat((dados.fontes || []).map((item) => [item.fonte, item.nome])),
+    [["", "Contas bancárias"], ["todas", "Todas"]].concat((dados.fontes || []).map((item) => [item.fonte, item.nome])),
     (evento) => {
       movEstado.fonte = evento.target.value;
+      movEstado.limite = PASSO_MOVIMENTOS;
       renderAtual();
     },
   )));
@@ -1072,6 +1129,7 @@ function filtrosMovimentos(dados) {
     [["", "Todas"]].concat((dados.categorias || []).map((nome) => [nome, nome])),
     (evento) => {
       movEstado.categoria = evento.target.value;
+      movEstado.limite = PASSO_MOVIMENTOS;
       renderAtual();
     },
   )));
@@ -1080,15 +1138,18 @@ function filtrosMovimentos(dados) {
     [["", "Todos"]].concat((dados.tipos || []).map((nome) => [nome, nome])),
     (evento) => {
       movEstado.tipo = evento.target.value;
+      movEstado.limite = PASSO_MOVIMENTOS;
       renderAtual();
     },
   )));
   linha.append(campoData("De", movEstado.inicio, (evento) => {
     movEstado.inicio = evento.target.value;
+    movEstado.limite = PASSO_MOVIMENTOS;
     renderAtual();
   }));
   linha.append(campoData("Até", movEstado.fim, (evento) => {
     movEstado.fim = evento.target.value;
+    movEstado.limite = PASSO_MOVIMENTOS;
     renderAtual();
   }));
   return linha;
@@ -1132,11 +1193,25 @@ function tabelaMovimentos(dados) {
     tr.append(h("td", { text: linha.tipo || "" }));
     tr.append(h("td", {
       class: "num",
-      text: esconderLigado() ? sentido(linha.montante) : fmtEur(linha.montante, linha.moeda),
+      text: esconderLigado() || linha.montante == null
+        ? linha.sentido || sentido(linha.montante)
+        : fmtEur(linha.montante, linha.moeda),
     }));
     corpo.append(tr);
   });
   bloco.append(h("div", { class: "tabela-wrap" }, h("table", {}, h("thead", {}, cabeca), corpo)));
+  if (dados.total > linhas.length) {
+    bloco.append(h("p", {}, h("button", {
+      type: "button",
+      class: "mais",
+      text: "Mostrar mais " + PASSO_MOVIMENTOS,
+      onclick: (evento) => {
+        evento.currentTarget.disabled = true;
+        movEstado.limite += PASSO_MOVIMENTOS;
+        atualizarTabelaMovimentos();
+      },
+    })));
+  }
   return bloco;
 }
 

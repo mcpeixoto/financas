@@ -10,8 +10,11 @@ from decimal import Decimal
 
 from financas import config
 from financas.analise import (
+    _como_data,
+    _ultimo_run_por_fonte,
     alocacao,
     estatisticas_curiosas,
+    fontes_bancarias,
     patrimonio_serie,
     preencher_patrimonio,
 )
@@ -136,6 +139,86 @@ def _veredicto(db) -> dict:
     return {"frases": frases, "indisponivel": False}
 
 
+_NOMES_CLASSE = {"acao": "Ação", "etf": "ETF", "cripto": "Cripto", "fx": "Câmbio", "outro": "Outro"}
+_CEM = Decimal(100)
+
+
+def _esconder(params: dict) -> bool:
+    """Modo escondido: a resposta não leva montantes em euros, só percentagens e índices."""
+    texto = str(params.get("esconder") or "").strip().casefold()
+    return texto in {"1", "true", "sim", "on"}
+
+
+def _dec(valor) -> Decimal:
+    if valor is None or valor == "":
+        return Decimal(0)
+    if isinstance(valor, Decimal):
+        return valor
+    return Decimal(str(valor))
+
+
+def _razao(parte, total) -> float | None:
+    if parte is None or total is None:
+        return None
+    base = _dec(total)
+    if base == 0:
+        return None
+    return float(_dec(parte) / base)
+
+
+def _indice(valor, base: Decimal | None) -> float | None:
+    """Valor em índice: 100 = ``base``."""
+    if valor is None or base is None or base == 0:
+        return None
+    return float(_dec(valor) * _CEM / base)
+
+
+def _base_ultimo_total(colunas: list[list]) -> Decimal | None:
+    """Total do último ponto de séries empilhadas (em valor absoluto), ou None se for zero."""
+    if not colunas:
+        return None
+    n = max(len(coluna) for coluna in colunas)
+    if n == 0:
+        return None
+    total = sum((_dec(coluna[n - 1]) for coluna in colunas if len(coluna) == n), start=Decimal(0))
+    total = abs(total)
+    return total or None
+
+
+def _base_maximo(*listas) -> Decimal | None:
+    maior = Decimal(0)
+    for lista in listas:
+        for valor in lista:
+            if valor is not None:
+                maior = max(maior, abs(_dec(valor)))
+    return maior or None
+
+
+def nome_classe(classe: str | None) -> str:
+    """Nome legível da classe de ativo."""
+    chave = (classe or "").strip()
+    return _NOMES_CLASSE.get(chave, chave.capitalize() if chave else "—")
+
+
+def _nome_fonte_rotulo(fonte: str) -> str:
+    try:
+        return _posicoes().nome_fonte_rotulo(fonte)
+    except Exception:
+        return display_name(fonte)
+
+
+def _rotulos(pares) -> list[str]:
+    """Junta a fonte ao nome quando o mesmo nome aparece em mais de uma fonte."""
+    lista = list(pares)
+    fontes: dict[str, set[str]] = {}
+    for fonte, nome in lista:
+        fontes.setdefault(nome, set()).add(fonte)
+    return [
+        f"{nome} ({_nome_fonte_rotulo(fonte)})" if len(fontes.get(nome, ())) > 1 else nome
+        for fonte, nome in lista
+    ]
+
+
 def _realizado_ano(db, fonte: str | None) -> list[dict]:
     try:
         pares = _posicoes().realizado_por_ano(db, fonte)
@@ -154,7 +237,7 @@ def _etiqueta(texto: str) -> str:
     return "sem_dados"
 
 
-def _historico(hist) -> dict:
+def _historico(hist, esconder: bool = False) -> dict:
     datas = []
     nomes: list[str] = []
     vistos: set[str] = set()
@@ -165,27 +248,28 @@ def _historico(hist) -> dict:
             if nome not in vistos:
                 vistos.add(nome)
                 nomes.append(nome)
+    colunas = {nome: [_dec(mapa.get(nome, 0)) for _dia_ponto, mapa in pontos] for nome in nomes}
+    base = _base_ultimo_total(list(colunas.values())) if esconder else None
     series = []
     for nome in nomes:
-        series.append(
-            {
-                "nome": nome,
-                "cor": _cor(nome),
-                "valores": [float(mapa.get(nome, 0)) for _dia_ponto, mapa in pontos],
-            }
-        )
+        if esconder:
+            valores = [_indice(valor, base) if base else 0.0 for valor in colunas[nome]]
+        else:
+            valores = [float(valor) for valor in colunas[nome]]
+        series.append({"nome": nome, "cor": _cor(nome), "valores": valores})
     return {
         "datas": datas,
         "series": series,
+        "unidade": "indice" if esconder else "eur",
         "sem_preco": [str(item) for item in (getattr(hist, "sem_preco", []) or [])],
     }
 
 
-def _par(valor) -> dict | None:
+def _par(valor, esconder: bool = False) -> dict | None:
     if valor is None:
         return None
     nome, montante = valor
-    return {"nome": str(nome), "valor": float(montante)}
+    return {"nome": str(nome), "valor": None if esconder else float(montante)}
 
 
 def _posicoes_vazio() -> dict:
@@ -193,6 +277,8 @@ def _posicoes_vazio() -> dict:
     return {
         "indisponivel": True,
         "atuais": [],
+        "cartoes": None,
+        "ganho_por_posicao": [],
         "realizado_por_simbolo": [],
         "realizado_por_ano": [],
         "estatisticas": None,
@@ -201,69 +287,155 @@ def _posicoes_vazio() -> dict:
     }
 
 
-def _posicao_atual(item) -> dict:
-    return {
+def _ganho(item) -> Decimal | None:
+    if item.latente_eur is None:
+        return None
+    return _dec(item.latente_eur) + _dec(item.realizado_eur) + _dec(item.dividendos_eur)
+
+
+def _posicao_atual(item, rotulo: str | None = None, esconder: bool = False) -> dict:
+    ganho = _ganho(item)
+    custo = item.custo_eur
+    linha = {
         "fonte": item.fonte,
         "nome_fonte": display_name(item.fonte),
         "cor": _cor(display_name(item.fonte)),
         "simbolo": item.simbolo,
         "nome": item.nome,
+        "rotulo": rotulo or item.nome,
         "classe": item.classe,
+        "classe_nome": nome_classe(item.classe),
         "quantidade": float(item.quantidade),
         "valor_eur": _num(item.valor_eur),
-        "custo_eur": _num(item.custo_eur),
+        "custo_eur": _num(custo),
         "latente_eur": _num(item.latente_eur),
         "latente_pct": _num(item.latente_pct),
         "peso": float(item.peso),
         "realizado_eur": float(item.realizado_eur),
         "dividendos_eur": float(item.dividendos_eur),
+        "realizado_pct": _razao(item.realizado_eur, item.valor_eur),
+        "dividendos_pct": _razao(item.dividendos_eur, item.valor_eur),
+        "ganho_eur": _num(ganho),
+        "ganho_pct": _razao(ganho, custo) if ganho is not None else None,
+    }
+    if esconder:
+        for chave in (
+            "quantidade",
+            "valor_eur",
+            "custo_eur",
+            "latente_eur",
+            "realizado_eur",
+            "dividendos_eur",
+            "ganho_eur",
+        ):
+            linha[chave] = None
+    return linha
+
+
+def _cartoes_posicoes(itens) -> dict:
+    pesos = sorted((_dec(item.peso) for item in itens), reverse=True)
+    custo = Decimal(0)
+    latente = Decimal(0)
+    for item in itens:
+        if item.custo_eur is None or item.latente_eur is None:
+            continue
+        custo += _dec(item.custo_eur)
+        latente += _dec(item.latente_eur)
+    return {
+        "abertas": len(itens),
+        "peso_top3": float(sum(pesos[:3], start=Decimal(0))) if pesos else None,
+        "latente_pct": _razao(latente, custo) if custo else None,
     }
 
 
-def _estatisticas(item) -> dict:
+def _estatisticas(item, esconder: bool = False) -> dict:
     return {
         "fechados": int(item.fechados),
         "taxa_acerto": _num(item.taxa_acerto),
-        "ganho_medio_eur": _num(item.ganho_medio_eur),
-        "perda_media_eur": _num(item.perda_media_eur),
-        "melhor": _par(item.melhor),
-        "pior": _par(item.pior),
+        "ganho_medio_eur": None if esconder else _num(item.ganho_medio_eur),
+        "perda_media_eur": None if esconder else _num(item.perda_media_eur),
+        "melhor": _par(item.melhor, esconder),
+        "pior": _par(item.pior, esconder),
         "fator_lucro": _num(item.fator_lucro),
-        "realizado_total_eur": float(item.realizado_total_eur),
+        "realizado_total_eur": None if esconder else float(item.realizado_total_eur),
     }
 
 
+def _ultimo_por_fonte(db) -> tuple[dict[str, tuple[Decimal, date]], date | None]:
+    """Valor do snapshot mais recente de cada fonte e o dia da última corrida."""
+    ultimos = _ultimo_run_por_fonte(db)
+    dias = {run_id: _como_data(at) for run_id, at in db.execute("SELECT id, at FROM runs")}
+    valores: dict[str, tuple[Decimal, date]] = {}
+    for fonte, run_id in ultimos.items():
+        total = Decimal(0)
+        for (montante,) in db.execute(
+            "SELECT amount_eur FROM balances WHERE run_id = ? AND source = ?", (run_id, fonte)
+        ):
+            total += _dec(montante)
+        for (montante,) in db.execute(
+            "SELECT value_eur FROM positions WHERE run_id = ? AND source = ?", (run_id, fonte)
+        ):
+            total += _dec(montante)
+        valores[fonte] = (total, dias.get(run_id))
+    ultima = max(dias.values()) if dias else None
+    return valores, ultima
+
+
 def resumo(db, params: dict) -> dict:
+    esconder = _esconder(params)
     serie = patrimonio_serie(db)
     cheia, preenchida = preencher_patrimonio(serie)
     variacao = variacao_patrimonio(serie)
-    ultimo = serie[-1][1] if serie else {}
+    ultimos, ultima_corrida = _ultimo_por_fonte(db)
+    total = sum((valor for valor, _dia_fonte in ultimos.values()), start=Decimal(0))
     fontes = []
-    for fonte in ordered_sources(ultimo):
+    desatualizadas = []
+    for fonte in ordered_sources(ultimos):
+        valor, dia_fonte = ultimos[fonte]
+        atrasada = dia_fonte is not None and ultima_corrida is not None and dia_fonte < ultima_corrida
+        if atrasada:
+            desatualizadas.append(fonte)
         fontes.append(
             {
                 "fonte": fonte,
                 "nome": display_name(fonte),
-                "valor": float(ultimo[fonte]),
+                "valor": None if esconder else float(valor),
+                "peso": _razao(valor, total),
                 "cor": _cor(display_name(fonte)),
+                "desatualizada_desde": _dia(dia_fonte) if atrasada else None,
             }
         )
     nomes = ordered_sources(fonte for _dia, por_fonte, _total in cheia for fonte in por_fonte)
+    colunas = {fonte: [_dec(por_fonte.get(fonte, 0)) for _dia, por_fonte, _total in cheia] for fonte in nomes}
+    base = _base_ultimo_total(list(colunas.values())) if esconder else None
     series = []
     for fonte in nomes:
+        if esconder:
+            valores = [_indice(valor, base) if base else 0.0 for valor in colunas[fonte]]
+        else:
+            valores = [float(valor) for valor in colunas[fonte]]
         series.append(
             {
                 "fonte": fonte,
                 "nome": display_name(fonte),
                 "cor": _cor(display_name(fonte)),
-                "valores": [float(por_fonte.get(fonte, 0)) for _dia, por_fonte, _total in cheia],
+                "valores": valores,
             }
         )
-    classes = []
-    for nome, valor in alocacao(db).items():
-        if valor == 0:
-            continue
-        classes.append({"nome": nome, "valor": float(valor), "cor": _cor(nome)})
+    por_classe = {nome: _dec(valor) for nome, valor in alocacao(db).items() if valor != 0}
+    resto = total - sum(por_classe.values(), start=Decimal(0))
+    if resto > Decimal("0.005"):
+        por_classe["Outros"] = por_classe.get("Outros", Decimal(0)) + resto
+    soma_classes = sum(por_classe.values(), start=Decimal(0))
+    classes = [
+        {
+            "nome": nome,
+            "valor": None if esconder else float(valor),
+            "peso": _razao(valor, soma_classes),
+            "cor": _cor(nome),
+        }
+        for nome, valor in por_classe.items()
+    ]
     avisos = []
     ok = 0
     for fonte, estado, texto in avisos_ultimo_run(db):
@@ -277,24 +449,30 @@ def resumo(db, params: dict) -> dict:
                 "texto": texto,
             }
         )
+    primeiro = next((linha_total for _dia, _por_fonte, linha_total in cheia if linha_total != 0), None)
+    ultimo_total = cheia[-1][2] if cheia else None
     return {
-        "patrimonio": float(variacao.total),
+        "esconder": esconder,
+        "patrimonio": None if esconder else float(total),
+        "patrimonio_indice": _indice(ultimo_total, abs(primeiro) if primeiro else None),
         "dia": _dia(variacao.dia),
         "fontes": fontes,
+        "desatualizadas": desatualizadas,
         "n_fontes_ok": ok,
         "variacao": {
-            "anterior": _num(variacao.anterior),
-            "delta_anterior": _num(variacao.delta_anterior),
+            "anterior": None if esconder else _num(variacao.anterior),
+            "delta_anterior": None if esconder else _num(variacao.delta_anterior),
             "delta_anterior_pct": _num(variacao_relativa(variacao.delta_anterior, variacao.anterior)),
             "dia_anterior": _dia(variacao.dia_anterior),
-            "ha_30_dias": _num(variacao.ha_30_dias),
-            "delta_30": _num(variacao.delta_30),
+            "ha_30_dias": None if esconder else _num(variacao.ha_30_dias),
+            "delta_30": None if esconder else _num(variacao.delta_30),
             "delta_30_pct": _num(variacao_relativa(variacao.delta_30, variacao.ha_30_dias)),
             "dia_30": _dia(variacao.dia_30),
         },
         "serie": {
             "datas": [_dia(dia) for dia, _por_fonte, _total in cheia],
             "preenchida": bool(preenchida),
+            "unidade": "indice" if esconder else "eur",
             "series": series,
         },
         "alocacao": classes,
@@ -303,21 +481,67 @@ def resumo(db, params: dict) -> dict:
     }
 
 
+def _mensal(db, fonte: str | None, esconder: bool) -> dict:
+    """Série mensal de depositado, valor e MSCI World de uma plataforma (ou do total)."""
+    try:
+        pontos = list(_posicoes().historico_plataforma(db, fonte))
+    except Exception:
+        pontos = []
+    datas = [_dia(ponto.dia) for ponto in pontos]
+    depositado = [_dec(ponto.depositado) for ponto in pontos]
+    valor = [_dec(ponto.valor) for ponto in pontos]
+    indice = [None if ponto.indice is None else _dec(ponto.indice) for ponto in pontos]
+    ganho = [v - d for v, d in zip(valor, depositado, strict=True)]
+    if not esconder:
+        return {
+            "datas": datas,
+            "unidade": "eur",
+            "depositado": [float(item) for item in depositado],
+            "valor": [float(item) for item in valor],
+            "indice": [None if item is None else float(item) for item in indice],
+            "ganho": [float(item) for item in ganho],
+        }
+    base = abs(depositado[-1]) if depositado and depositado[-1] != 0 else None
+    if base is None and valor:
+        base = abs(valor[-1]) or None
+    return {
+        "datas": datas,
+        "unidade": "indice",
+        "depositado": [_indice(item, base) for item in depositado],
+        "valor": [_indice(item, base) for item in valor],
+        "indice": [_indice(item, base) for item in indice],
+        "ganho": [_indice(item, base) for item in ganho],
+    }
+
+
+def _anos_escondidos(rendimentos: list[dict], realizado: list[dict]) -> tuple[list[dict], list[dict]]:
+    base = _base_maximo([item["valor"] for item in rendimentos], [item["valor"] for item in realizado])
+    return (
+        [{"ano": item["ano"], "valor": None, "indice": _indice(item["valor"], base)} for item in rendimentos],
+        [{"ano": item["ano"], "valor": None, "indice": _indice(item["valor"], base)} for item in realizado],
+    )
+
+
 def investimentos(db, params: dict) -> dict:
+    esconder = _esconder(params)
     linhas = []
     for bloco in montar_investimentos(db):
         linha = bloco["linha"]
         referencia = bloco["referencia"]
         fonte = bloco["fonte"]
         nome = bloco["nome"]
+        rendimentos = [{"ano": int(ano), "valor": float(valor)} for ano, valor in bloco["rendimentos"]]
+        realizado = _realizado_ano(db, fonte)
+        if esconder:
+            rendimentos, realizado = _anos_escondidos(rendimentos, realizado)
         linhas.append(
             {
                 "nome": nome,
                 "fonte": fonte,
                 "cor": _cor(nome),
-                "depositado": float(linha.depositado_liquido),
-                "valor": float(linha.valor_atual),
-                "ganho": float(linha.ganho_absoluto),
+                "depositado": None if esconder else float(linha.depositado_liquido),
+                "valor": None if esconder else float(linha.valor_atual),
+                "ganho": None if esconder else float(linha.ganho_absoluto),
                 "ganho_pct": _num(linha.ganho_pct),
                 "xirr": _num(linha.xirr),
                 "xirr_indice": _num(referencia.xirr),
@@ -325,46 +549,83 @@ def investimentos(db, params: dict) -> dict:
                 "etiqueta": _etiqueta(bloco["veredicto"]),
                 "nota": linha.nota or "",
                 "curva": [
-                    {"dia": _dia(dia), "capital": float(capital), "valor": float(valor)}
+                    {
+                        "dia": _dia(dia),
+                        "capital": None if esconder else float(capital),
+                        "valor": None if esconder else float(valor),
+                    }
                     for dia, capital, valor in bloco["curva"]
                 ],
-                "rendimentos": [
-                    {"ano": int(ano), "valor": float(valor)} for ano, valor in bloco["rendimentos"]
-                ],
-                "realizado": _realizado_ano(db, fonte),
+                "mensal": _mensal(db, fonte, esconder),
+                "rendimentos": rendimentos,
+                "realizado": realizado,
             }
         )
-    return {"linhas": linhas}
+    try:
+        sem = [display_name(fonte) for fonte in _posicoes().plataformas_sem_depositos(db)]
+    except Exception:
+        sem = []
+    return {"esconder": esconder, "linhas": linhas, "sem_depositos": sem}
 
 
 def posicoes(db, params: dict) -> dict:
+    esconder = _esconder(params)
     try:
         modulo = _posicoes()
-        atuais = [_posicao_atual(item) for item in modulo.posicoes_atuais(db)]
+        itens = list(modulo.posicoes_atuais(db))
+        rotulos = _rotulos((item.fonte, item.nome or item.simbolo) for item in itens)
+        atuais = [
+            _posicao_atual(item, rotulo, esconder) for item, rotulo in zip(itens, rotulos, strict=True)
+        ]
+        vendidos = list(modulo.realizado_por_simbolo(db))
+        rotulos_vendas = _rotulos((item.fonte, item.nome or item.simbolo) for item in vendidos)
         simbolos = [
             {
                 "fonte": item.fonte,
                 "nome_fonte": display_name(item.fonte),
                 "simbolo": item.simbolo,
                 "nome": item.nome,
+                "rotulo": rotulo,
                 "vendas": int(item.vendas),
                 "ganhos": int(item.ganhos),
-                "realizado_eur": float(item.realizado_eur),
+                "realizado_eur": None if esconder else float(item.realizado_eur),
                 "ainda_aberta": bool(item.ainda_aberta),
             }
-            for item in modulo.realizado_por_simbolo(db)
+            for item, rotulo in zip(vendidos, rotulos_vendas, strict=True)
         ]
-        anos = [
-            {"ano": int(ano), "valor": float(valor)} for ano, valor in modulo.realizado_por_ano(db)
-        ]
-        estatisticas = _estatisticas(modulo.estatisticas_negocios(db))
-        custo = _historico(modulo.historico_custo(db))
-        valor = _historico(modulo.historico_valor(db))
+        anos = [{"ano": int(ano), "valor": float(valor)} for ano, valor in modulo.realizado_por_ano(db)]
+        if esconder:
+            anos, _nada = _anos_escondidos(anos, [])
+        estatisticas = _estatisticas(modulo.estatisticas_negocios(db), esconder)
+        custo = _historico(modulo.historico_custo(db), esconder)
+        valor = _historico(modulo.historico_valor(db), esconder)
     except Exception:
         return _posicoes_vazio()
+    ganhos = []
+    for item, linha in zip(itens, atuais, strict=True):
+        ganho = _ganho(item)
+        if ganho is None:
+            continue
+        pct = linha["ganho_pct"]
+        if esconder and pct is None:
+            continue
+        ganhos.append(
+            {
+                "rotulo": linha["rotulo"],
+                "fonte": item.fonte,
+                "simbolo": item.simbolo,
+                "ganho_eur": None if esconder else float(ganho),
+                "ganho_pct": pct,
+            }
+        )
+    chave = "ganho_pct" if esconder else "ganho_eur"
+    ganhos.sort(key=lambda linha: (linha[chave] if linha[chave] is not None else 0.0, linha["rotulo"]))
     return {
+        "esconder": esconder,
         "indisponivel": False,
         "atuais": atuais,
+        "cartoes": _cartoes_posicoes(itens),
+        "ganho_por_posicao": ganhos,
         "realizado_por_simbolo": simbolos,
         "realizado_por_ano": anos,
         "estatisticas": estatisticas,
@@ -373,7 +634,7 @@ def posicoes(db, params: dict) -> dict:
     }
 
 
-def _receitas_gastos(db, inicio: date, fim: date) -> list[dict]:
+def _receitas_gastos_decimal(db, inicio: date, fim: date) -> list[tuple[str, Decimal, Decimal]]:
     from financas.analise import _movimentos
 
     movimentos, _avisos = _movimentos(db, None, inicio, fim)
@@ -397,47 +658,91 @@ def _receitas_gastos(db, inicio: date, fim: date) -> list[dict]:
             slot["receitas"] += abs(movimento.eur)
         elif movimento.tipo == "gasto":
             slot["gastos"] += abs(movimento.eur)
+    return [(chave, valores["receitas"], valores["gastos"]) for chave, valores in acumulado.items()]
+
+
+def _receitas_gastos(db, inicio: date, fim: date, esconder: bool = False) -> list[dict]:
+    meses = _receitas_gastos_decimal(db, inicio, fim)
+    if not esconder:
+        return [
+            {"periodo": chave, "receitas": float(receitas), "gastos": float(gastos)}
+            for chave, receitas, gastos in meses
+        ]
+    base = _base_maximo([receitas for _c, receitas, _g in meses], [gastos for _c, _r, gastos in meses])
     return [
-        {"periodo": chave, "receitas": float(valores["receitas"]), "gastos": float(valores["gastos"])}
-        for chave, valores in acumulado.items()
+        {
+            "periodo": chave,
+            "receitas": None,
+            "gastos": None,
+            "indice_receitas": _indice(receitas, base),
+            "indice_gastos": _indice(gastos, base),
+        }
+        for chave, receitas, gastos in meses
     ]
 
 
 def gastos(db, params: dict) -> dict:
+    esconder = _esconder(params)
     periodo = _texto(params, "periodo") or "este mês"
     freq = _texto(params, "freq") or "mes"
     inicio, fim = resolver_periodo(periodo, date.today(), _data(_texto(params, "inicio")), _data(_texto(params, "fim")))
     painel = preparar_gastos(db, inicio, fim, freq)
+    total_categorias = sum(
+        (_dec(valor) for valor in painel.por_categoria.values() if valor != 0), start=Decimal(0)
+    )
     categorias = [
-        {"nome": nome, "valor": float(valor), "cor": _cor(nome)}
+        {
+            "nome": nome,
+            "valor": None if esconder else float(valor),
+            "peso": _razao(valor, total_categorias),
+            "cor": _cor(nome),
+            "_ordem": float(valor),
+        }
         for nome, valor in painel.por_categoria.items()
         if valor != 0
     ]
-    categorias.sort(key=lambda item: (item["nome"].casefold() == "outros", -item["valor"], item["nome"]))
+    categorias.sort(key=lambda item: (item["nome"].casefold() == "outros", -item["_ordem"], item["nome"]))
+    for item in categorias:
+        del item["_ordem"]
+    totais_periodo = {
+        chave: sum((_dec(mapa.get(chave, 0)) for mapa in painel.empilhado.values()), start=Decimal(0))
+        for chave in painel.periodos
+    }
     empilhado = []
     for nome, mapa in painel.empilhado.items():
+        brutos = [_dec(mapa.get(periodo_chave, 0)) for periodo_chave in painel.periodos]
         empilhado.append(
             {
                 "nome": nome,
                 "cor": _cor(nome),
-                "valores": [float(mapa.get(periodo_chave, 0)) for periodo_chave in painel.periodos],
+                "valores": None if esconder else [float(valor) for valor in brutos],
+                "pesos": [
+                    _razao(valor, totais_periodo[chave]) or 0.0
+                    for valor, chave in zip(brutos, painel.periodos, strict=True)
+                ],
+                "_ordem": float(sum(brutos, start=Decimal(0))),
             }
         )
-    empilhado.sort(key=lambda item: (item["nome"].casefold() == "outros", -sum(item["valores"]), item["nome"]))
+    empilhado.sort(key=lambda item: (item["nome"].casefold() == "outros", -item["_ordem"], item["nome"]))
+    for item in empilhado:
+        del item["_ordem"]
     comparacao = []
     for linha in painel.comparacao:
         comparacao.append(
             {
                 "categoria": linha.categoria,
                 "cor": _cor(linha.categoria),
-                "este_mes": float(linha.este_mes),
-                "mes_anterior": float(linha.mes_anterior),
-                "media_3_meses": float(linha.media_3_meses),
+                "este_mes": None if esconder else float(linha.este_mes),
+                "mes_anterior": None if esconder else float(linha.mes_anterior),
+                "media_3_meses": None if esconder else float(linha.media_3_meses),
                 "vs_anterior": _num(linha.vs_anterior),
                 "vs_media": _num(linha.vs_media),
             }
         )
+    total_subscricoes = sum((_dec(item.custo_anual) for item in painel.subscricoes), start=Decimal(0))
+    total_dias = sum((_dec(valor) for _nome, valor in painel.dias), start=Decimal(0))
     return {
+        "esconder": esconder,
         "inicio": inicio.isoformat(),
         "fim": fim.isoformat(),
         "freq": freq,
@@ -445,43 +750,76 @@ def gastos(db, params: dict) -> dict:
         "avisos": list(painel.avisos),
         "periodos": list(painel.periodos),
         "empilhado": empilhado,
-        "comerciantes": [{"nome": nome, "valor": float(valor)} for nome, valor in painel.comerciantes],
+        "comerciantes": [
+            {
+                "nome": nome,
+                "valor": None if esconder else float(valor),
+                "peso": _razao(valor, total_categorias),
+            }
+            for nome, valor in painel.comerciantes
+        ],
         "subscricoes": [
             {
                 "nome": item.nome,
                 "periodicidade": item.periodicidade,
-                "custo_anual": float(item.custo_anual),
+                "custo_anual": None if esconder else float(item.custo_anual),
+                "peso": _razao(item.custo_anual, total_subscricoes),
             }
             for item in painel.subscricoes
         ],
-        "dias": [{"nome": nome, "valor": float(valor)} for nome, valor in painel.dias],
+        "dias": [
+            {
+                "nome": nome,
+                "valor": None if esconder else float(valor),
+                "peso": _razao(valor, total_dias) if total_dias else 0.0,
+            }
+            for nome, valor in painel.dias
+        ],
         "taxa_poupanca": _num(painel.taxa),
-        "receitas_gastos": _receitas_gastos(db, inicio, fim),
+        "receitas_gastos": _receitas_gastos(db, inicio, fim, esconder),
         "comparacao": comparacao,
         "frases": list(estatisticas_curiosas(db, inicio, fim)),
     }
 
 
+def _sentido(valor) -> str:
+    numero = _dec(valor)
+    if numero < 0:
+        return "saída"
+    if numero > 0:
+        return "entrada"
+    return "zero"
+
+
 def movimentos(db, params: dict) -> dict:
+    esconder = _esconder(params)
     limite = int(_texto(params, "limite") or 500)
     if limite < 0:
         raise ValueError("limite inválido")
+    escolha = _texto(params, "fonte")
+    bancarias = list(fontes_bancarias())
+    todas = escolha == "todas"
     linhas = listar_movimentos(
         db,
-        fonte=_texto(params, "fonte"),
+        fonte=None if todas or not escolha else escolha,
         categoria=_texto(params, "categoria"),
         tipo=_texto(params, "tipo"),
         texto=_texto(params, "texto"),
         inicio=_data(_texto(params, "inicio")),
         fim=_data(_texto(params, "fim")),
     )
+    if not escolha:
+        permitidas = set(bancarias)
+        linhas = [linha for linha in linhas if linha.fonte in permitidas]
+    linhas = list(reversed(linhas))
     fontes = []
     if _tabela(db, "transactions"):
         for (fonte,) in db.execute(
             "SELECT DISTINCT source FROM transactions WHERE source IS NOT NULL ORDER BY source"
         ):
-            fontes.append({"fonte": fonte, "nome": display_name(fonte)})
+            fontes.append({"fonte": fonte, "nome": display_name(fonte), "bancaria": fonte in bancarias})
     return {
+        "esconder": esconder,
         "linhas": [
             {
                 "data": linha.data.isoformat(),
@@ -489,7 +827,8 @@ def movimentos(db, params: dict) -> dict:
                 "nome_fonte": display_name(linha.fonte),
                 "conta": linha.conta,
                 "descricao": linha.descricao,
-                "montante": float(linha.valor),
+                "montante": None if esconder else float(linha.valor),
+                "sentido": _sentido(linha.valor),
                 "moeda": linha.moeda,
                 "tipo": linha.tipo,
                 "categoria": linha.categoria,
@@ -499,7 +838,9 @@ def movimentos(db, params: dict) -> dict:
         ],
         "total": len(linhas),
         "limite": limite,
+        "fonte": escolha or "",
         "fontes": fontes,
+        "bancarias": bancarias,
         "categorias": list(_CATEGORIAS),
         "tipos": list(_TIPOS),
     }

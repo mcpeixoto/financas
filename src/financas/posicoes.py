@@ -5,10 +5,26 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
-from financas.analise import _ultimo_run_por_fonte, alocacao, benchmarks, rentabilidade
+from financas.analise import (
+    _cashflows,
+    _fontes_investimento,
+    _snapshots_valor,
+    _tem_deposito,
+    _ultimo_run_por_fonte,
+    alocacao,
+    benchmarks,
+    rentabilidade,
+)
 from financas.report import display_name, ordered_sources
 
 _FX = {"USD": "EURUSD=X", "GBP": "EURGBP=X"}
+_INDICE = "IWDA.AS"
+_FONTE_ROTULO = {"bitcoin": "Cold wallet"}
+
+
+def nome_fonte_rotulo(fonte: str) -> str:
+    """Nome da fonte para juntar a um rótulo repetido, ex.: «Bitcoin (Cold wallet)»."""
+    return _FONTE_ROTULO.get(fonte, display_name(fonte))
 
 
 @dataclass(frozen=True)
@@ -126,7 +142,7 @@ def posicoes_atuais(db) -> list[PosicaoAtual]:
                 fonte,
                 simbolo,
                 nome_neg or grupo["nome"] or simbolo,
-                classe or "acao",
+                classe or ("cripto" if fonte == "bitcoin" else "acao"),
                 grupo["quantidade"],
                 valor,
                 custo_eur,
@@ -211,6 +227,139 @@ def historico_custo(db, freq: str = "mes") -> Historico:
 def historico_valor(db, freq: str = "mes") -> Historico:
     """Valor de mercado no fim de cada período. Sem cotação, fica ao custo."""
     return _historico(db, freq, valorizar=True)
+
+
+@dataclass(frozen=True)
+class PontoPlataforma:
+    dia: date
+    depositado: Decimal
+    valor: Decimal
+    indice: Decimal | None
+
+
+def historico_plataforma(db, source: str | None = None, freq: str = "mes") -> list[PontoPlataforma]:
+    """Depositado, valor estimado e os mesmos fluxos no MSCI World, no fim de cada período.
+
+    ``source=None`` soma as plataformas de investimento com depósitos. Uma fonte sem
+    depósitos devolve uma lista vazia. No último ponto o valor é o do último snapshot.
+    """
+    if freq not in {"mes", "semana"}:
+        raise ValueError("A frequência tem de ser 'mes' ou 'semana'.")
+    if source is None:
+        fontes = plataformas_com_depositos(db)
+    else:
+        fontes = [source] if _tem_deposito(db, source, None) else []
+    if not fontes:
+        return []
+    todos = _negocios(db)
+    eventos = {}
+    for fonte in fontes:
+        fluxos = _cashflows(db, fonte, None)
+        negocios = [linha for linha in todos if linha[1] == fonte]
+        eventos[fonte] = (fluxos, negocios)
+    primeiros = [
+        item[0]
+        for fluxos, negocios in eventos.values()
+        for item in (fluxos[:1] + negocios[:1])
+    ]
+    inicio = min(primeiros)
+    fim = date.today()
+    if fim < inicio:
+        fim = inicio
+    marcos = _fins(inicio, fim, freq)
+    tickers = _tickers(db)
+    precos = _precos(db)
+    somas: list[list] = [[Decimal(0), Decimal(0), Decimal(0), True] for _ in marcos]
+    for fonte in fontes:
+        fluxos, negocios = eventos[fonte]
+        snapshots = _snapshots_valor(db, fonte)
+        ultimo = snapshots[-1][1] if snapshots else None
+        serie = _serie_plataforma(fluxos, negocios, marcos, tickers, precos, ultimo)
+        for soma, (depositado, valor, indice) in zip(somas, serie, strict=True):
+            soma[0] += depositado
+            soma[1] += valor
+            if indice is None:
+                soma[3] = False
+            else:
+                soma[2] += indice
+    return [
+        PontoPlataforma(dia, soma[0], soma[1], soma[2] if soma[3] else None)
+        for dia, soma in zip(marcos, somas, strict=True)
+    ]
+
+
+def plataformas_com_depositos(db) -> list[str]:
+    """Plataformas de investimento com pelo menos um depósito."""
+    return ordered_sources(
+        fonte for fonte in _fontes_investimento(db, None, None) if _tem_deposito(db, fonte, None)
+    )
+
+
+def plataformas_sem_depositos(db) -> list[str]:
+    """Plataformas de investimento sem nenhum depósito registado."""
+    return ordered_sources(
+        fonte for fonte in _fontes_investimento(db, None, None) if not _tem_deposito(db, fonte, None)
+    )
+
+
+def _serie_plataforma(fluxos, negocios, marcos, tickers, precos, ultimo_snapshot):
+    referencia = precos.get(_INDICE) or []
+    estados: dict[tuple[str, str], _Lote] = {}
+    depositado = Decimal(0)
+    caixa = Decimal(0)
+    unidades = Decimal(0)
+    replicavel = bool(referencia)
+    i_fluxo = 0
+    i_negocio = 0
+    pontos = []
+    for dia in marcos:
+        while i_fluxo < len(fluxos) and fluxos[i_fluxo][0] <= dia:
+            quando, montante, kind = fluxos[i_fluxo]
+            caixa += montante
+            if kind in {"deposito", "levantamento"}:
+                depositado += montante
+                preco = _preco_indice(referencia, quando, precos, primeiro=True)
+                if preco is None:
+                    replicavel = False
+                else:
+                    unidades += montante / preco
+            i_fluxo += 1
+        while i_negocio < len(negocios) and negocios[i_negocio][0] <= dia:
+            _quando, fonte, simbolo, nome, quantidade, net_cash, cambio = negocios[i_negocio]
+            caixa += net_cash * cambio
+            _aplicar(estados, (fonte, simbolo), nome, quantidade, net_cash, cambio)
+            i_negocio += 1
+        mercado = sum(
+            (_valorizar(lote, chave, dia, tickers, precos)[0] for chave, lote in estados.items()),
+            start=Decimal(0),
+        )
+        indice = None
+        if replicavel:
+            preco = _preco_indice(referencia, dia, precos, primeiro=False)
+            if preco is not None:
+                indice = unidades * preco
+        pontos.append([depositado, caixa + mercado, indice])
+    if pontos and ultimo_snapshot is not None:
+        pontos[-1][1] = ultimo_snapshot
+    return [tuple(ponto) for ponto in pontos]
+
+
+def _preco_indice(serie, dia: date, precos, primeiro: bool) -> Decimal | None:
+    """Preço em EUR do índice no dia (ou antes). Com ``primeiro``, aceita o primeiro preço a seguir."""
+    if not serie:
+        return None
+    cotacao = _preco_ate(serie, dia)
+    quando = dia
+    if cotacao is None:
+        if not primeiro:
+            return None
+        quando, close, moeda = serie[0]
+        cotacao = (close, moeda)
+    close, moeda = cotacao
+    valor = _em_eur(close, moeda or "EUR", quando, precos)
+    if valor is None or valor == 0:
+        return None
+    return valor
 
 
 def veredicto(db) -> list[str]:
@@ -346,14 +495,22 @@ def _agrupar(estados, fotos, marcos, sem_chaves) -> Historico:
 
 def _nomes(estados: dict[tuple[str, str], _Lote]) -> dict[tuple[str, str], str]:
     base = {chave: (lote.nome.strip() or chave[1] or chave[0]) for chave, lote in estados.items()}
-    contagem: dict[str, int] = {}
-    for nome in base.values():
-        contagem[nome] = contagem.get(nome, 0) + 1
+    grupos: dict[str, list[tuple[str, str]]] = {}
+    for chave, nome in base.items():
+        grupos.setdefault(nome, []).append(chave)
     usados: set[str] = set()
     final: dict[tuple[str, str], str] = {}
     for chave in sorted(base):
         nome = base[chave]
-        if contagem[nome] > 1 or nome == "Outras":
+        chaves = grupos[nome]
+        fontes = {item[0] for item in chaves}
+        if len(fontes) > 1:
+            mesma_fonte = sum(1 for item in chaves if item[0] == chave[0])
+            if mesma_fonte > 1:
+                candidato = f"{nome} ({chave[1] or chave[0]}, {nome_fonte_rotulo(chave[0])})"
+            else:
+                candidato = f"{nome} ({nome_fonte_rotulo(chave[0])})"
+        elif len(chaves) > 1 or nome == "Outras":
             candidato = f"{nome} ({chave[1] or chave[0]})"
         else:
             candidato = nome

@@ -228,3 +228,6 @@ a:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible
   h1 { font-size: 1.2rem; }
   .valor { font-size: 1.15rem; }
 }
+
+.desatualizada { color: var(--suave); font-size: 0.8rem; }
+button.mais { margin-top: 0.6rem; }
