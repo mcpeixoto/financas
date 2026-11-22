@@ -7,6 +7,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from io import StringIO
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -14,7 +15,9 @@ from financas import store
 
 STOOQ = "https://stooq.com/q/d/l/?s={symbol}&i=d"
 YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+YAHOO_BUSCA = "https://query2.finance.yahoo.com/v1/finance/search"
 MEMPOOL = "https://mempool.space/api/v1/historical-price?currency=EUR&timestamp={timestamp}"
+_CAMBIO = ("EURUSD=X", "EURGBP=X")
 _USER_AGENT = "financas/0.1"
 _YAHOO_AGENT = "Mozilla/5.0"
 _YAHOO_DESDE = int(datetime(2010, 1, 1, tzinfo=timezone.utc).timestamp())
@@ -34,11 +37,104 @@ def atualizar_benchmark(db, symbol: str = "IWDA.UK") -> int:
     return store.save_prices(db, symbol, "USD", _parse_stooq(text))
 
 
-def _atualizar_yahoo(db, symbol: str) -> int:
+def _atualizar_yahoo(db, symbol: str, desde: date | None = None) -> int:
+    if desde is None:
+        inicio = _YAHOO_DESDE
+    else:
+        inicio = int(datetime(desde.year, desde.month, desde.day, tzinfo=timezone.utc).timestamp())
     agora = int(datetime.now(timezone.utc).timestamp())
-    url = f"{YAHOO.format(symbol=symbol)}?period1={_YAHOO_DESDE}&period2={agora}&interval=1d"
+    caminho = quote(symbol, safe="")
+    url = f"{YAHOO.format(symbol=caminho)}?period1={inicio}&period2={agora}&interval=1d"
     rows, currency = _parse_yahoo(_http_get(url, user_agent=_YAHOO_AGENT))
     return store.save_prices(db, symbol, currency, rows)
+
+
+def atualizar_precos_posicoes(db) -> list[str]:
+    """Resolve tickers em falta e grava o fecho diário. Avisos em vez de excepções."""
+    avisos: list[str] = []
+    for (fonte, simbolo), info in _por_resolver(db).items():
+        try:
+            yahoo, moeda = _resolver_yahoo(info["isin"], simbolo, info["classe"])
+        except Exception:
+            avisos.append(f"Não consegui procurar o ticker da Yahoo para {simbolo}.")
+            continue
+        db.execute(
+            "INSERT INTO tickers(source, symbol, yahoo, currency) VALUES(?,?,?,?)",
+            (fonte, simbolo, yahoo, moeda),
+        )
+        if not yahoo:
+            avisos.append(f"Não encontrei o ticker da Yahoo para {simbolo}.")
+    db.commit()
+
+    desde = _primeiro_negocio(db)
+    if desde is None:
+        return avisos
+    simbolos: list[str] = []
+    for (yahoo,) in db.execute("SELECT DISTINCT yahoo FROM tickers WHERE yahoo != '' ORDER BY yahoo"):
+        simbolos.append(yahoo)
+    for extra in _CAMBIO:
+        if extra not in simbolos:
+            simbolos.append(extra)
+    for yahoo in simbolos:
+        try:
+            _atualizar_yahoo(db, yahoo, desde=desde)
+        except Exception:
+            avisos.append(f"Não consegui descarregar as cotações de {yahoo}.")
+    return avisos
+
+
+def _por_resolver(db) -> dict[tuple[str, str], dict[str, str]]:
+    existentes = {(fonte, simbolo) for fonte, simbolo in db.execute("SELECT source, symbol FROM tickers")}
+    escolhidos: dict[tuple[str, str], dict[str, str]] = {}
+    for source, symbol, isin, asset_class, _booked in db.execute(
+        """SELECT source, symbol, isin, asset_class, booked FROM trades
+           WHERE COALESCE(asset_class, '') != 'fx'
+           ORDER BY booked, ext_id"""
+    ):
+        chave = (source or "", symbol or "")
+        if chave in existentes:
+            continue
+        actual = escolhidos.get(chave)
+        isin_limpo = (isin or "").strip()
+        classe = asset_class or ""
+        if actual is None:
+            escolhidos[chave] = {"isin": isin_limpo, "classe": classe}
+            continue
+        if classe:
+            actual["classe"] = classe
+        if isin_limpo:
+            actual["isin"] = isin_limpo
+    return dict(sorted(escolhidos.items()))
+
+
+def _resolver_yahoo(isin: str, simbolo: str, classe: str) -> tuple[str, str]:
+    if isin:
+        return _procurar_isin(isin)
+    if classe == "cripto":
+        return f"{simbolo}-USD", "USD"
+    return simbolo, ""
+
+
+def _procurar_isin(isin: str) -> tuple[str, str]:
+    query = urlencode({"q": isin, "quotesCount": 6, "newsCount": 0})
+    payload = json.loads(_http_get(f"{YAHOO_BUSCA}?{query}", user_agent=_YAHOO_AGENT))
+    quotes = payload.get("quotes") if isinstance(payload, dict) else None
+    if not isinstance(quotes, list) or not quotes or not isinstance(quotes[0], dict):
+        return "", ""
+    yahoo = str(quotes[0].get("symbol") or "").strip()
+    moeda = str(quotes[0].get("currency") or "").strip()
+    if not yahoo:
+        return "", ""
+    return yahoo, moeda
+
+
+def _primeiro_negocio(db) -> date | None:
+    row = db.execute(
+        "SELECT MIN(booked) FROM trades WHERE COALESCE(asset_class, '') != 'fx'"
+    ).fetchone()
+    if row is None or not row[0]:
+        return None
+    return date.fromisoformat(str(row[0])[:10])
 
 
 def btc_eur_diario(db, desde: date) -> int:
