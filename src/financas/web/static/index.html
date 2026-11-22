@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finanças</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topo">
+  <div class="miolo topo-miolo">
+    <strong class="marca">Finanças</strong>
+    <nav>
+      <a href="#resumo">Resumo</a>
+      <a href="#investimentos">Investimentos</a>
+      <a href="#posicoes">Posições</a>
+      <a href="#gastos">Gastos</a>
+      <a href="#movimentos">Movimentos</a>
+      <a href="#estado">Estado</a>
+    </nav>
+    <div class="acoes">
+      <button type="button" id="atualizar">Atualizar agora</button>
+      <label class="interruptor"><input type="checkbox" id="esconder" checked> Esconder valores</label>
+    </div>
+  </div>
+  <p id="progresso" class="progresso miolo" hidden aria-live="polite"></p>
+</header>
+<main id="painel" class="miolo"></main>
+<script src="/static/plotly.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
