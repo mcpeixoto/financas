@@ -11,7 +11,7 @@ import httpx
 
 from financas import config, secrets
 from financas.fx import Rates
-from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Position, Transaction
+from financas.models import Balance, Cashflow, FetchResult, NeedsUserAction, Position, Trade, Transaction
 
 NAME = "etoro"
 SECRETS = {
@@ -98,7 +98,7 @@ def _instrument_rows(data) -> list:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        for key in ("instruments", "instrumentDisplayData", "items", "data"):
+        for key in ("instruments", "instrumentDisplayDatas", "instrumentDisplayData", "items", "data"):
             found = _ci(data, key)
             if isinstance(found, list):
                 return found
@@ -315,6 +315,7 @@ def fetch(since: date, _sleep=None) -> FetchResult:
     if aviso is not None and aviso not in warnings:
         warnings.append(aviso)
     cashflows.extend(manuais)
+    trades = _negocios(open_rows, closed, meta, since, warnings)
     return FetchResult(
         source=NAME,
         balances=balances,
@@ -322,7 +323,191 @@ def fetch(since: date, _sleep=None) -> FetchResult:
         transactions=transactions,
         warnings=warnings,
         cashflows=cashflows,
+        trades=trades,
     )
+
+
+_CLASSES = {10: "cripto", 5: "acao", 6: "etf"}
+
+
+def _primeiro_dec(row: dict, *keys: str) -> Decimal | None:
+    for key in keys:
+        raw = _ci(row, key)
+        if raw in (None, ""):
+            continue
+        try:
+            return _dec(raw)
+        except (TypeError, ValueError, ArithmeticError):
+            continue
+    return None
+
+
+def _data_negocio(row: dict, *keys: str) -> date | None:
+    for key in keys:
+        booked = _as_date(_ci(row, key))
+        if booked is not None:
+            return booked
+    return None
+
+
+def _classe_etoro(meta: dict | None) -> str:
+    if not meta:
+        return "outro"
+    try:
+        return _CLASSES.get(int(_ci(meta, "instrumentTypeID")), "outro")
+    except (TypeError, ValueError):
+        return "outro"
+
+
+def _instrumento(meta: dict | None, instrument_id: str) -> tuple[str, str, str, str]:
+    if not meta:
+        return instrument_id, instrument_id, "", "outro"
+    symbol = _ci(meta, "symbolFull") or instrument_id
+    name = _ci(meta, "instrumentDisplayName") or instrument_id
+    isin = _ci(meta, "isin") or ""
+    return str(symbol), str(name), str(isin), _classe_etoro(meta)
+
+
+def _taxa(explicita: Decimal | None, dinheiro: Decimal | None, unidades: Decimal) -> Decimal | None:
+    if explicita is not None:
+        return explicita
+    if dinheiro is not None and unidades != 0:
+        return dinheiro / unidades
+    return None
+
+
+def _fx_usd(warnings: list[str]) -> Decimal | None:
+    try:
+        return Rates.fetch().to_eur(Decimal(1), "USD")
+    except Exception:
+        warnings.append("Não foi possível converter os negócios da eToro para euros.")
+        return None
+
+
+def _negocios(
+    open_rows: list,
+    closed: list[dict],
+    meta: dict[str, dict],
+    since: date,
+    warnings: list[str],
+) -> list[Trade]:
+    """Compras das posições abertas e o par compra/venda das posições fechadas.
+
+    fx_to_eur é a taxa atual USD→EUR do BCE (quantos euros vale 1 dólar), a mesma
+    que Rates.to_eur já aplica aos movimentos. A API pública não traz o câmbio do
+    dia do negócio, por isso usa-se a taxa corrente.
+    """
+    drafts: list[tuple[dict, Decimal | None]] = []
+    seen: set[str] = set()
+
+    def add(fields: dict, pnl_usd: Decimal | None) -> None:
+        if fields["ext_id"] in seen:
+            return
+        seen.add(fields["ext_id"])
+        drafts.append((fields, pnl_usd))
+
+    for row in open_rows:
+        if isinstance(row, dict):
+            _compra(row, meta, add)
+    for row in closed:
+        fecho = _data_negocio(row, "closeTimestamp", "closeDate")
+        if fecho is None or fecho < since:
+            continue
+        _compra(row, meta, add)
+        _venda(row, meta, fecho, add)
+    if not drafts:
+        return []
+    fx = _fx_usd(warnings)
+    if fx is None:
+        return []
+    found = [
+        Trade(**fields, fx_to_eur=fx, realized_pnl_eur=None if pnl is None else pnl * fx)
+        for fields, pnl in drafts
+    ]
+    found.sort(key=lambda item: (item.booked, item.ext_id))
+    return found
+
+
+def _compra(row: dict, meta: dict[str, dict], add) -> None:
+    position_id = _ci(row, "positionID")
+    if position_id is None:
+        return
+    booked = _data_negocio(row, "openTimestamp", "openDate")
+    units = _primeiro_dec(row, "units")
+    if booked is None or units is None or units == 0:
+        return
+    units = abs(units)
+    invested = _primeiro_dec(row, "amount", "investment")
+    if invested is not None:
+        invested = abs(invested)
+    price = _taxa(_primeiro_dec(row, "openRate"), invested, units)
+    if price is None:
+        return
+    if invested is None:
+        invested = units * price
+    instrument_id = _id_instrumento(row)
+    symbol, name, isin, classe = _instrumento(meta.get(instrument_id), instrument_id)
+    add(
+        {
+            "source": NAME,
+            "booked": booked,
+            "symbol": symbol,
+            "name": name,
+            "isin": isin,
+            "asset_class": classe,
+            "quantity": units,
+            "price": price,
+            "currency": "USD",
+            "net_cash": -invested,
+            "ext_id": f"{_id_key(position_id)}-buy",
+        },
+        None,
+    )
+
+
+def _venda(row: dict, meta: dict[str, dict], booked: date, add) -> None:
+    position_id = _ci(row, "positionID")
+    if position_id is None:
+        return
+    units = _primeiro_dec(row, "units")
+    if units is None or units == 0:
+        return
+    units = abs(units)
+    invested = _primeiro_dec(row, "amount", "investment")
+    if invested is not None:
+        invested = abs(invested)
+    profit = _primeiro_dec(row, "netProfit")
+    proceeds = invested + profit if invested is not None and profit is not None else None
+    price = _taxa(_primeiro_dec(row, "closeRate"), proceeds, units)
+    if price is None:
+        return
+    if proceeds is None:
+        proceeds = units * price
+    instrument_id = _id_instrumento(row)
+    symbol, name, isin, classe = _instrumento(meta.get(instrument_id), instrument_id)
+    add(
+        {
+            "source": NAME,
+            "booked": booked,
+            "symbol": symbol,
+            "name": name,
+            "isin": isin,
+            "asset_class": classe,
+            "quantity": -units,
+            "price": price,
+            "currency": "USD",
+            "net_cash": proceeds,
+            "ext_id": f"{_id_key(position_id)}-sell",
+        },
+        profit,
+    )
+
+
+def _id_instrumento(row: dict) -> str:
+    raw = _ci(row, "instrumentID")
+    if raw is None:
+        return "?"
+    return _id_key(raw)
 
 
 def _depositos_manuais(since: date) -> tuple[list[Cashflow], str | None]:

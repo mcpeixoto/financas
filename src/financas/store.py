@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS cashflows(source TEXT, booked TEXT, amount_eur TEXT, 
     description TEXT, ext_id TEXT, PRIMARY KEY(source, ext_id));
 CREATE TABLE IF NOT EXISTS prices(symbol TEXT, day TEXT, close TEXT, currency TEXT,
     PRIMARY KEY(symbol, day));
+CREATE TABLE IF NOT EXISTS trades(source TEXT, booked TEXT, symbol TEXT, name TEXT, isin TEXT,
+    asset_class TEXT, quantity TEXT, price TEXT, currency TEXT, net_cash TEXT, fx_to_eur TEXT,
+    realized_pnl_eur TEXT, ext_id TEXT, PRIMARY KEY(source, ext_id));
+CREATE TABLE IF NOT EXISTS tickers(source TEXT, symbol TEXT, yahoo TEXT, currency TEXT,
+    PRIMARY KEY(source, symbol));
 """
 
 
@@ -85,6 +90,23 @@ def save_cashflows(db: sqlite3.Connection, rows) -> int:
                VALUES(?,?,?,?,?,?)""",
             (row.source, row.booked.isoformat(), str(row.amount_eur), row.kind,
              row.description, row.ext_id),
+        )
+    db.commit()
+    return _inserted(db, before)
+
+
+def save_trades(db: sqlite3.Connection, rows) -> int:
+    """INSERT OR IGNORE. Devolve o número de negócios novos."""
+    before = db.total_changes
+    for row in rows:
+        db.execute(
+            """INSERT OR IGNORE INTO trades(
+                   source, booked, symbol, name, isin, asset_class, quantity, price,
+                   currency, net_cash, fx_to_eur, realized_pnl_eur, ext_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (row.source, row.booked.isoformat(), row.symbol, row.name, row.isin, row.asset_class,
+             str(row.quantity), str(row.price), row.currency, str(row.net_cash), str(row.fx_to_eur),
+             None if row.realized_pnl_eur is None else str(row.realized_pnl_eur), row.ext_id),
         )
     db.commit()
     return _inserted(db, before)

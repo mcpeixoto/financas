@@ -53,6 +53,30 @@ class Cashflow:
     ext_id: str
 
 
+@dataclass(frozen=True)
+class Trade:
+    """Compra ou venda de um instrumento.
+
+    quantity > 0 é compra e < 0 é venda. price e net_cash estão na moeda
+    `currency` (na compra, net_cash < 0, já com comissões). fx_to_eur é quantos
+    euros vale 1 unidade dessa moeda no dia. realized_pnl_eur só nas vendas.
+    """
+
+    source: str
+    booked: date
+    symbol: str
+    name: str
+    isin: str
+    asset_class: str    # acao | etf | cripto | fx | outro
+    quantity: Decimal
+    price: Decimal
+    currency: str
+    net_cash: Decimal
+    fx_to_eur: Decimal
+    realized_pnl_eur: Decimal | None
+    ext_id: str
+
+
 @dataclass
 class FetchResult:
     source: str
@@ -61,6 +85,7 @@ class FetchResult:
     transactions: list[Transaction] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     cashflows: list[Cashflow] = field(default_factory=list)
+    trades: list[Trade] = field(default_factory=list)
 
 
 class NeedsUserAction(Exception):
