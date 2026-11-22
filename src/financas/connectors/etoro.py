@@ -432,7 +432,8 @@ def _compra(row: dict, meta: dict[str, dict], add) -> None:
     position_id = _ci(row, "positionID")
     if position_id is None:
         return
-    booked = _data_negocio(row, "openTimestamp", "openDate")
+    # O portfólio usa openDateTime; o histórico usa openTimestamp.
+    booked = _data_negocio(row, "openTimestamp", "openDate", "openDateTime")
     units = _primeiro_dec(row, "units")
     if booked is None or units is None or units == 0:
         return

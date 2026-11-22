@@ -204,6 +204,11 @@ def _atualizar_precos(db, desde: date) -> None:
         precos.btc_eur_diario(db, desde)
     except Exception:
         print("Aviso: não foi possível atualizar a cotação diária do Bitcoin.")
+    try:
+        for aviso in precos.atualizar_precos_posicoes(db):
+            print(f"Aviso: {aviso}")
+    except Exception:
+        print("Aviso: não foi possível atualizar as cotações das posições.")
 
 
 def _backfill_one(db, name: str, desde: date) -> str:
